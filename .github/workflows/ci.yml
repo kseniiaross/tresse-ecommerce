@@ -28,6 +28,14 @@ jobs:
       DB_HOST: localhost
       DB_PORT: "5432"
 
+      # Placeholder Stripe values so orders/views_stripe.py's webhook-secret
+      # guard doesn't 500 before reaching the mocked stripe.* calls in tests.
+      # Not real credentials — safe to keep in plain text.
+      USE_STRIPE: "False"
+      STRIPE_PUBLIC_KEY: pk_test_dummy
+      STRIPE_SECRET_KEY: sk_test_dummy
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy
+
     services:
       postgres:
         image: postgres:16
