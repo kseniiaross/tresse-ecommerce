@@ -25,3 +25,5 @@ skip_empty = true
 
 [tool.ruff.lint.per-file-ignores]
 "accounts/serializers.py" = ["N815"]
+# DATABASES etc. come from `from .settings import *`
+"tresse/settings_test.py" = ["F405"]
