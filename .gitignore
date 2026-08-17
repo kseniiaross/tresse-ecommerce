@@ -37,6 +37,8 @@ __pycache__/
 
 # Django collected static
 staticfiles/
+# Local/test product media — served from Cloudinary in production
+tresse_backend/media/
 # Videos
 *.webm
 tresse_frontend/src/assets/videos/
