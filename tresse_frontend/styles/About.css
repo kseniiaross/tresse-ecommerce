@@ -1,0 +1,107 @@
+.about {
+	width: 100%;
+	max-width: 1200px;
+	margin: 0 auto;
+	min-height: calc(100dvh - var(--header-height));
+	padding: 56px var(--container-pad) 160px;
+	box-sizing: border-box;
+	color: var(--text-primary);
+	background: var(--c-white);
+}
+
+/* =========================
+   HERO
+   ========================= */
+
+.about__hero {
+	margin-bottom: 80px;
+}
+
+.about__kicker {
+	margin: 0 0 16px;
+	color: var(--text-muted);
+	font-size: var(--kicker-size);
+	line-height: 1.4;
+	letter-spacing: var(--kicker-spacing);
+	text-transform: uppercase;
+}
+
+.about__title {
+	margin: 0;
+	font-family: "Playfair Display", serif;
+	font-size: clamp(36px, 6vw, 64px);
+	font-weight: 500;
+	line-height: 1.1;
+}
+
+/* =========================
+   CONTENT
+   ========================= */
+
+.about__content {
+	width: 100%;
+	max-width: 720px;
+	color: var(--text-secondary);
+	font-size: 16px;
+	line-height: 1.7;
+}
+
+.about__content p {
+	margin: 0 0 24px;
+}
+
+.about__content p:last-child {
+	margin-bottom: 0;
+}
+
+/* =========================
+   SIGNATURE
+   ========================= */
+
+.about__signature {
+	margin-top: 48px;
+	font-weight: 500;
+	letter-spacing: 0.05em;
+}
+
+/* =========================
+   TABLET
+   ========================= */
+
+@media (width <= 1200px) {
+	.about {
+		padding-bottom: 120px;
+	}
+
+	.about__hero {
+		margin-bottom: 64px;
+	}
+}
+
+/* =========================
+   MOBILE
+   ========================= */
+
+@media (width <= 767px) {
+	.about {
+		padding: 40px var(--container-pad) 96px;
+	}
+
+	.about__hero {
+		margin-bottom: 48px;
+	}
+
+	.about__title {
+		font-size: clamp(30px, 10vw, 42px);
+		line-height: 1.12;
+	}
+
+	.about__content {
+		font-size: 15px;
+		line-height: 1.75;
+	}
+
+	.about__signature {
+		margin-top: 40px;
+	}
+}

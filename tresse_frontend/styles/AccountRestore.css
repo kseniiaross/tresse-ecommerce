@@ -1,0 +1,178 @@
+.accountRestore {
+	--page-pad-top-gap: 28px;
+	--page-pad-bottom: 120px;
+
+	min-height: calc(100dvh - var(--header-height));
+	display: flex;
+	flex-direction: column;
+	padding: calc(var(--header-height) + var(--page-pad-top-gap))
+		var(--container-pad) var(--page-pad-bottom) var(--container-pad);
+	background: var(--c-white);
+	color: var(--text-primary);
+	box-sizing: border-box;
+}
+
+/* =========================
+   CONTENT
+   ========================= */
+
+.accountRestore__content {
+	flex: 1;
+	width: 100%;
+	max-width: 980px;
+	margin: 0 auto;
+}
+
+/* =========================
+   HEADER
+   ========================= */
+
+.accountRestore__header {
+	margin-bottom: 1.75rem;
+	padding-bottom: 1rem;
+	border-bottom: 1px solid var(--border);
+}
+
+.accountRestore__title {
+	margin: 0;
+	font-size: clamp(1.8rem, 3.2vw, 2.6rem);
+	font-weight: 600;
+	line-height: 1.1;
+	letter-spacing: var(--track-lg);
+	text-transform: uppercase;
+}
+
+.accountRestore__text {
+	margin: 0.6rem 0;
+	color: var(--text-soft);
+	font-size: 1rem;
+	line-height: 1.7;
+}
+
+/* =========================
+   SECTIONS
+   ========================= */
+
+.accountRestore__section {
+	padding: 1.25rem 0;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.accountRestore__section:last-child {
+	border-bottom: none;
+}
+
+.accountRestore__h2 {
+	margin: 0 0 0.6rem;
+	font-size: 1.02rem;
+	font-weight: 650;
+	letter-spacing: 0.08em;
+	line-height: 1.3;
+	text-transform: uppercase;
+}
+
+/* =========================
+   FORM
+   ========================= */
+
+.accountRestore__form {
+	width: 100%;
+	max-width: 520px;
+	margin-top: 8px;
+}
+
+.accountRestore__field {
+	margin-top: 14px;
+}
+
+.accountRestore__label {
+	display: block;
+	margin-bottom: 8px;
+	color: rgb(0 0 0 / 78%);
+	font-size: 12px;
+	line-height: 1.4;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+}
+
+.accountRestore__input {
+	width: 100%;
+	padding: 12px;
+	border: 1px solid rgb(0 0 0 / 18%);
+	background: var(--c-white);
+	color: var(--text-primary);
+	font-size: 14px;
+	letter-spacing: 0.02em;
+	outline: none;
+	box-sizing: border-box;
+	transition:
+		border-color 160ms ease,
+		outline-color 160ms ease;
+}
+
+.accountRestore__input:focus-visible {
+	outline: 2px solid rgb(0 0 0 / 28%);
+	outline-offset: 3px;
+	border-color: rgb(0 0 0 / 42%);
+}
+
+/* =========================
+   STATES
+   ========================= */
+
+.accountRestore__error {
+	margin: 8px 0 0;
+	color: #b00020;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.accountRestore__success {
+	margin-top: 12px;
+	color: var(--text-soft);
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+/* =========================
+   ACTIONS
+   ========================= */
+
+.accountRestore__actions {
+	margin-top: 18px;
+}
+
+/* =========================
+   LINKS
+   ========================= */
+
+.accountRestore__link {
+	color: inherit;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+	transition: opacity 160ms ease;
+}
+
+.accountRestore__link:hover {
+	opacity: 0.9;
+}
+
+.accountRestore__link:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 4px;
+	border-radius: 6px;
+}
+
+/* =========================
+   MOBILE
+   ========================= */
+
+@media (width <= 767px) {
+	.accountRestore {
+		--page-pad-bottom: 96px;
+	}
+
+	.accountRestore__title {
+		letter-spacing: 0.1em;
+	}
+}

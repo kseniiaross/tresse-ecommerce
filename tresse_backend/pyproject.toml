@@ -1,0 +1,27 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B"]
+ignore = ["N999"]  # если где-то имена app не по конвенции
+
+[tool.ruff.lint.isort]
+known-first-party = ["accounts", "orders", "products", "newsletter", "cart", "tresse"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tresse.settings_test"
+python_files = ["test_*.py", "*_test.py", "tests.py"]
+addopts = "--reuse-db -v"
+
+[tool.coverage.run]
+source = ["accounts", "orders", "products", "newsletter"]
+omit = ["*/migrations/*", "*/tests.py", "manage.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.ruff.lint.per-file-ignores]
+"accounts/serializers.py" = ["N815"]

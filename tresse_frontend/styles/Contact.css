@@ -1,0 +1,139 @@
+.contact {
+	width: 100%;
+	max-width: 1200px;
+	margin: 0 auto;
+	min-height: calc(100svh - var(--header-height));
+	padding: 48px var(--container-x-tablet) 96px;
+	box-sizing: border-box;
+	background: var(--c-white);
+	color: var(--text);
+}
+
+/* =========================
+   HERO
+   ========================= */
+
+.contact__hero {
+	margin-bottom: 72px;
+}
+
+.contact__kicker {
+	margin: 0 0 16px;
+	color: var(--text-muted);
+	font-size: 12px;
+	line-height: 1.4;
+	letter-spacing: var(--track-xl);
+	text-transform: uppercase;
+}
+
+.contact__title {
+	margin: 0;
+	font-family: "Playfair Display", serif;
+	font-size: clamp(36px, 6vw, 64px);
+	font-weight: 500;
+	line-height: 1.1;
+}
+
+/* =========================
+   CONTENT
+   ========================= */
+
+.contact__content {
+	width: 100%;
+	max-width: 640px;
+	color: var(--text);
+	font-size: 16px;
+	line-height: 1.7;
+}
+
+.contact__content p {
+	margin: 0 0 24px;
+}
+
+.contact__content p:last-child {
+	margin-bottom: 0;
+}
+
+/* =========================
+   EMAIL
+   ========================= */
+
+.contact__email {
+	margin-top: 48px;
+}
+
+.contact__label {
+	display: block;
+	margin-bottom: 8px;
+	color: var(--text-muted);
+	font-size: 12px;
+	line-height: 1.4;
+	letter-spacing: var(--track-lg);
+	text-transform: uppercase;
+}
+
+.contact__link {
+	color: var(--text);
+	font-size: 18px;
+	line-height: 1.4;
+	text-decoration: none;
+	border-bottom: 1px solid var(--border);
+	transition:
+		border-color 180ms ease,
+		opacity 180ms ease;
+}
+
+.contact__link:hover {
+	opacity: 0.9;
+	border-bottom-color: var(--text);
+}
+
+.contact__link:focus-visible {
+	border-bottom-color: transparent;
+	border-radius: 4px;
+}
+
+/* =========================
+   TABLET
+   ========================= */
+
+@media (width <= 1200px) {
+	.contact {
+		padding-bottom: 80px;
+	}
+
+	.contact__hero {
+		margin-bottom: 60px;
+	}
+}
+
+/* =========================
+   MOBILE
+   ========================= */
+
+@media (width <= 768px) {
+	.contact {
+		padding: 40px var(--container-x-mobile) 72px;
+	}
+
+	.contact__hero {
+		margin-bottom: 48px;
+	}
+
+	.contact__title {
+		font-size: clamp(30px, 10vw, 42px);
+	}
+
+	.contact__content {
+		font-size: 15px;
+		line-height: 1.75;
+	}
+
+	.contact__email {
+		margin-top: 40px;
+	}
+
+	.contact__link {
+		font-size: 16px;
+	}
+}

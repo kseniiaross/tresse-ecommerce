@@ -1,0 +1,12 @@
+Back in stock
+
+Good news — {{ product_name }} is back in stock.
+
+{% if product_url %}
+Shop now: {{ product_url }}
+{% endif %}
+
+Need help?
+Contact us at {{ support_email }}.
+
+— TRESSE

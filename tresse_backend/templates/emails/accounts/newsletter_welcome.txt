@@ -1,0 +1,7 @@
+Hi {{ name }},
+Welcome to TRESSE
+
+Thank you for subscribing to our newsletter.
+You’ll receive updates about new collections and exclusive offers.
+
+— TRESSE

@@ -1,0 +1,15 @@
+Refund Initiated
+
+Hi {{ order.full_name|default:"there" }},
+
+A refund has been initiated for your order.
+
+Order number: #{{ order.id }}
+Order date: {{ order.created_at }}
+
+Refunds typically take a few business days to appear, depending on your bank.
+
+Need help?
+Reply to this email or contact us at {{ support_email }}.
+
+— TRESSE

@@ -1,0 +1,184 @@
+/* =========================================================================
+   LAYOUT
+   ========================================================================= */
+
+.choice {
+	font-family: var(--font-luxury);
+	position: relative;
+	width: 100%;
+	min-height: 100dvh;
+	margin-top: calc(var(--header-height) * -1);
+	overflow: hidden;
+	background: var(--surface-warm);
+}
+
+/* =========================================================================
+   BACKGROUND IMAGE
+   ========================================================================= */
+
+.choice__background {
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	width: 100%;
+	height: 100%;
+	display: block;
+	object-fit: cover;
+	object-position: center 44%;
+}
+
+/* =========================================================================
+   ATMOSPHERE OVERLAY
+   ========================================================================= */
+
+.choice__overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	pointer-events: none;
+	background: linear-gradient(
+		90deg,
+		rgb(248 245 241 / 96%) 0%,
+		rgb(248 245 241 / 90%) 20%,
+		rgb(248 245 241 / 62%) 42%,
+		rgb(248 245 241 / 20%) 64%,
+		rgb(248 245 241 / 0%) 100%
+	);
+}
+
+/* =========================================================================
+   CONTENT
+   ========================================================================= */
+
+.choice__layout {
+	position: relative;
+	z-index: 2;
+	width: 100%;
+	min-height: 100dvh;
+	display: flex;
+	align-items: center;
+	padding: var(--header-height) clamp(72px, 9vw, 180px) 24px;
+	box-sizing: border-box;
+}
+
+.choice__content {
+	width: 100%;
+	max-width: 340px;
+	text-align: center;
+	transform: translateY(-42px);
+}
+
+.choice__title {
+	margin: 0 0 1.5rem;
+	color: var(--text);
+	font-size: 1.45rem;
+	font-weight: 600;
+	line-height: 1.45;
+	letter-spacing: 0.28rem;
+	text-transform: uppercase;
+}
+
+.choice__subtitle {
+	margin: 0 0 2rem;
+	color: rgb(17 17 17 / 75%);
+	font-size: 0.95rem;
+	line-height: 1.6;
+}
+
+/* =========================================================================
+   ACTIONS
+   ========================================================================= */
+
+.choice__actions {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.choice__cta {
+	height: var(--button-height-lg);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	text-decoration: none;
+	letter-spacing: var(--track-xl);
+	text-transform: uppercase;
+	transition: var(--transition-default);
+}
+
+.choice__cta--primary {
+	border: 1px solid var(--text);
+	background: var(--text);
+	color: var(--c-white);
+}
+
+.choice__cta--primary:hover {
+	background: var(--c-black);
+}
+
+.choice__cta--secondary {
+	border: 1px solid rgb(17 17 17 / 15%);
+	background: var(--glass-white-soft);
+	color: var(--text);
+	backdrop-filter: blur(10px);
+}
+
+.choice__cta--secondary:hover {
+	background: var(--glass-white-strong);
+}
+
+/* =========================================================================
+   TABLET
+   ========================================================================= */
+
+@media (width <= 1024px) {
+	.choice__background {
+		object-position: center 46%;
+	}
+
+	.choice__layout {
+		padding: var(--header-height) clamp(48px, 7vw, 96px) 24px;
+	}
+
+	.choice__content {
+		transform: translateY(-32px);
+	}
+}
+
+/* =========================================================================
+   MOBILE
+   ========================================================================= */
+
+@media (width <= 767px) {
+	.choice__background {
+		object-position: center 48%;
+	}
+
+	.choice__overlay {
+		background: linear-gradient(
+			180deg,
+			rgb(248 245 241 / 92%) 0%,
+			rgb(248 245 241 / 65%) 42%,
+			rgb(248 245 241 / 28%) 100%
+		);
+	}
+
+	.choice__layout {
+		justify-content: center;
+		padding: var(--header-height) 24px 24px;
+	}
+
+	.choice__content {
+		max-width: 320px;
+		transform: translateY(-24px);
+	}
+
+	.choice__title {
+		font-size: 1.2rem;
+		letter-spacing: 0.18rem;
+	}
+
+	.choice__subtitle {
+		font-size: 0.9rem;
+	}
+}

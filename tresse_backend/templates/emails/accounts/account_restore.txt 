@@ -1,0 +1,16 @@
+Account Restore
+
+Hi {{ first_name|default:"there" }},
+
+We received a request to restore your TRESSE account.
+
+Restore your account using this link:
+{{ restore_url }}
+
+If you did not request this, please ignore this email or contact support:
+{{ support_email }}
+
+Help page:
+{{ help_url }}
+
+— TRESSE

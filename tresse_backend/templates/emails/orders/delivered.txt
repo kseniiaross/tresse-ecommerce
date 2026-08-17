@@ -1,0 +1,12 @@
+Delivered
+
+Hi {{ order.full_name|default:"there" }},
+
+Your order has been delivered.
+
+Order number: #{{ order.id }}
+
+Need help?
+Reply to this email or contact us at {{ support_email }}.
+
+— TRESSE

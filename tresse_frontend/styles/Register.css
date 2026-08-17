@@ -1,0 +1,214 @@
+.register {
+	--register-top-gap: 40px;
+	--register-bottom-gap: 60px;
+	--register-control-width: 300px;
+	--register-control-width-mobile: 320px;
+	--register-media-vpad: 16px;
+
+	padding: var(--register-top-gap) var(--container-pad)
+		var(--register-bottom-gap) var(--container-pad);
+	font-family: var(--font-luxury);
+	background: var(--c-white);
+}
+
+/* =========================================================================
+   LAYOUT
+   ========================================================================= */
+
+.register__layout {
+	width: 100%;
+	min-height: calc(
+		100dvh -
+		var(--header-height) -
+		var(--register-top-gap) -
+		var(--register-bottom-gap)
+	);
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+	align-items: center;
+	column-gap: clamp(36px, 5vw, 80px);
+}
+
+.register__left,
+.register__right {
+	display: grid;
+	place-items: center;
+	min-width: 0;
+}
+
+/* =========================================================================
+   CONTENT
+   ========================================================================= */
+
+.register__content {
+	width: 100%;
+	max-width: var(--register-control-width);
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	text-align: center;
+}
+
+.register__title {
+	width: 100%;
+	margin: 0 0 1.5rem;
+	font-size: 1.28rem;
+	line-height: 1.45;
+	letter-spacing: 0.3rem;
+	text-transform: uppercase;
+}
+
+/* =========================================================================
+   FORM
+   ========================================================================= */
+
+.register__form {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+}
+
+.register__field {
+	display: flex;
+	flex-direction: column;
+	text-align: left;
+}
+
+.register__label {
+	margin-bottom: 0.25rem;
+	font-size: 0.875rem;
+	font-weight: 700;
+}
+
+.register__input {
+	width: 100%;
+	padding: 0.8rem;
+	border: 1px solid var(--c-black);
+	background: var(--c-white);
+	color: var(--text);
+	font-size: 1rem;
+	box-sizing: border-box;
+}
+
+.register__input:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+}
+
+/* =========================================================================
+   ERRORS
+   ========================================================================= */
+
+.register__error {
+	margin-top: 0.25rem;
+	color: var(--error);
+	font-size: 0.85rem;
+}
+
+.register__serverError {
+	width: 100%;
+	margin-top: 1rem;
+	padding: 0.6rem 0.8rem;
+	box-sizing: border-box;
+	border-radius: 4px;
+	background: var(--error-bg, #ffeaea);
+	color: var(--text-soft);
+	font-size: 0.85rem;
+	line-height: 1.35;
+}
+
+/* =========================================================================
+   CTA
+   ========================================================================= */
+
+.register__cta {
+	width: 100%;
+	height: 44px;
+	margin-top: 0.5rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	text-align: center;
+	text-decoration: none;
+	user-select: none;
+	font-size: 0.9rem;
+	letter-spacing: var(--track-lg);
+	text-transform: uppercase;
+	transition: var(--transition-default);
+}
+
+.register__cta--primary {
+	border: 1px solid var(--c-black);
+	background: var(--c-black);
+	color: var(--c-white);
+	cursor: pointer;
+}
+
+.register__cta--primary:hover,
+.register__cta--primary:focus-visible {
+	background: var(--text);
+}
+
+.register__cta:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+/* =========================================================================
+   MEDIA
+   ========================================================================= */
+
+.register__media {
+	width: clamp(640px, 46vw, 980px);
+	max-width: 100%;
+	padding: var(--register-media-vpad) 0;
+	display: grid;
+	place-items: center;
+	box-sizing: border-box;
+}
+
+.register__image {
+	width: 100%;
+	height: auto;
+	max-height: calc(
+		100dvh -
+		var(--header-height) -
+		var(--register-top-gap) -
+		var(--register-bottom-gap) -
+		(var(--register-media-vpad) * 2)
+	);
+	display: block;
+	object-fit: contain;
+	object-position: center;
+	filter: grayscale(12%) contrast(1.03);
+}
+
+/* =========================================================================
+   MOBILE
+   ========================================================================= */
+
+@media (width <= 767px) {
+	.register {
+		--register-bottom-gap: 30px;
+		--register-media-vpad: 14px;
+
+		padding-top: calc(var(--header-height) + 18px);
+	}
+
+	.register__layout {
+		grid-template-columns: 1fr;
+		min-height: auto;
+		row-gap: 24px;
+	}
+
+	.register__content {
+		max-width: var(--register-control-width-mobile);
+	}
+
+	.register__right {
+		display: none;
+	}
+}

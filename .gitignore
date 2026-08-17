@@ -1,0 +1,47 @@
+# === Node / Frontend ===
+node_modules/
+dist/
+build/
+**/node_modules/
+**/dist/
+**/build/
+
+# === Environment ===
+.env
+.env.*
+*.local
+
+# === Logs ===
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# === OS ===
+.DS_Store
+
+# === IDE ===
+.vscode/
+.idea/
+
+# === Python / Django ===
+__pycache__/
+*.pyc
+db.sqlite3
+
+venv/
+.venv/
+Lib/
+Scripts/
+pyvenv.cfg
+__pycache__/
+
+# Django collected static
+staticfiles/
+# Videos
+*.webm
+tresse_frontend/src/assets/videos/
+
+# === Personal interview-prep / testing notes (not for public repo) ===
+docs/bugs-and-issues-found.md
+docs/testing-session-summary.md
+tresse_frontend/docs/monkey-test-results.md

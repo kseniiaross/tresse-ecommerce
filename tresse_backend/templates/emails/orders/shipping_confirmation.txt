@@ -1,0 +1,20 @@
+Shipping Confirmation
+
+Hi {{ order.full_name|default:"there" }},
+
+Good news — your order is on the way.
+
+Order number: #{{ order.id }}
+
+{% if tracking_number %}
+Tracking number: {{ tracking_number }}
+{% endif %}
+
+{% if tracking_url %}
+Track your package: {{ tracking_url }}
+{% endif %}
+
+Need help?
+Reply to this email or contact us at {{ support_email }}.
+
+— TRESSE

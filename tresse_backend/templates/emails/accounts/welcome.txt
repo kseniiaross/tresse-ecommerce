@@ -1,0 +1,21 @@
+Hi {{ name }},
+
+Welcome to TRESSE — your account has been created successfully.
+
+As a welcome gift, enjoy 15% off your first purchase.
+
+Your promo code:
+
+TRESSE15
+
+Enter this code during checkout to receive your discount.
+
+Visit:
+{{ frontend_url }}
+
+If you have any questions, simply reply to this email or contact:
+{{ support_email }}
+
+Thank you for choosing TRESSE.
+
+— The TRESSE Team

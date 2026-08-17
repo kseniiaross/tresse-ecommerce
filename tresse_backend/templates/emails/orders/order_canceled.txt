@@ -1,0 +1,15 @@
+Order Canceled
+
+Hi {{ order.full_name|default:"there" }},
+
+Your order has been canceled.
+
+Order number: #{{ order.id }}
+Order date: {{ order.created_at }}
+
+If your payment was captured, a refund has been initiated. Depending on your bank, it may take a few business days to appear.
+
+Need help?
+Reply to this email or contact us at {{ support_email }}.
+
+— TRESSE

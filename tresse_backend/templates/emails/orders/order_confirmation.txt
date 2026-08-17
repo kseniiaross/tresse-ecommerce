@@ -1,0 +1,29 @@
+Order Confirmation
+
+Hi {{ order.full_name|default:"there" }},
+
+Thank you for your order — we’ve received your payment and we’re preparing your items.
+
+Your TRESSE order #{{ order.id }} is confirmed.
+Order date: {{ order.created_at|date:"M d, Y" }} at {{ order.created_at|date:"H:i" }} UTC
+
+Shipping to
+{{ order.full_name }}
+{{ order.address }}
+{% if order.city %}{{ order.city }}{% endif %}{% if order.state %}, {{ order.state }}{% endif %} {{ order.postal_code }}
+{{ order.country }}
+
+Payment
+Paid with: Card{% if order.card_last4 %} •••• {{ order.card_last4 }}{% endif %}
+
+Items
+{% for it in items %}
+- {{ it.quantity }} × {{ it.product_name }}{% if it.size %} ({{ it.size }}){% endif %} — ${{ it.unit_price }}
+{% endfor %}
+
+Total: ${{ order.total_amount }}
+
+Need help?
+Reply to this email{% if support_email %} or contact {{ support_email }}{% endif %}{% if support_url %} or visit {{ support_url }}{% endif %}
+
+— TRESSE

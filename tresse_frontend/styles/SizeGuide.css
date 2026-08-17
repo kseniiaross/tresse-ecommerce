@@ -1,0 +1,269 @@
+.sizeGuide {
+	width: 100%;
+	max-width: 980px;
+	min-height: calc(100dvh - var(--header-height));
+	margin: 0 auto;
+	padding: calc(var(--header-height) - 36px) var(--container-pad)
+		clamp(28px, 4vh, 72px);
+	box-sizing: border-box;
+	color: var(--text);
+	font-family: var(--font-luxury);
+}
+
+/* =========================================================================
+   HEADER
+   ========================================================================= */
+
+.sizeGuide__title {
+	margin: 0;
+	font-size: clamp(26px, 3vw, 38px);
+	font-weight: 700;
+	line-height: 1.1;
+	letter-spacing: 0.02em;
+}
+
+.sizeGuide__subtitle {
+	max-width: 70ch;
+	margin: 10px 0 0;
+	color: var(--text-soft);
+	line-height: 1.55;
+}
+
+/* =========================================================================
+   TABS
+   ========================================================================= */
+
+.sizeGuide__tabs {
+	display: flex;
+	justify-content: center;
+	gap: 12px;
+	margin: 28px 0 32px;
+}
+
+.sizeGuide__tab {
+	min-width: 130px;
+	height: 38px;
+	border: 1px solid var(--border);
+	border-radius: 0;
+	background: transparent;
+	color: var(--text);
+	font-family: inherit;
+	font-size: 12px;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	cursor: pointer;
+	transition:
+		background-color 0.2s ease,
+		color 0.2s ease,
+		border-color 0.2s ease;
+}
+
+.sizeGuide__tab:hover {
+	border-color: var(--text);
+}
+
+.sizeGuide__tab.is-active {
+	background: var(--text);
+	color: var(--c-white);
+}
+
+/* =========================================================================
+   BLOCKS
+   ========================================================================= */
+
+.sizeGuide__block {
+	margin-top: 14px;
+	padding: clamp(16px, 2.5vw, 22px);
+	border: 1px solid var(--border);
+	border-radius: 0;
+	background: var(--c-white);
+}
+
+.sizeGuide__block--visual {
+	display: grid;
+	grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+	gap: 32px;
+	align-items: start;
+}
+
+.sizeGuide__heading {
+	margin: 0 0 12px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--border);
+	font-size: 16px;
+	font-weight: 600;
+	letter-spacing: var(--track-sm);
+	text-transform: uppercase;
+}
+
+/* =========================================================================
+   IMAGE
+   ========================================================================= */
+
+.sizeGuide__imageWrap {
+	width: 100%;
+	overflow: hidden;
+	background: rgb(17 17 17 / 2%);
+}
+
+.sizeGuide__image {
+	width: 100%;
+	display: block;
+	object-fit: contain;
+}
+
+.sizeGuide__measureContent {
+	min-width: 0;
+}
+
+/* =========================================================================
+   MEASUREMENTS
+   ========================================================================= */
+
+.sizeGuide__measure {
+	padding: 14px 0;
+	border-top: 1px solid var(--border-soft);
+}
+
+.sizeGuide__measure:first-of-type {
+	padding-top: 0;
+	border-top: none;
+}
+
+.sizeGuide__measureTitle {
+	margin: 0 0 6px;
+	font-size: 15px;
+	font-weight: 500;
+}
+
+.sizeGuide__text {
+	margin: 0;
+	color: var(--text-soft);
+	line-height: 1.65;
+}
+
+.sizeGuide__text + .sizeGuide__text {
+	margin-top: 10px;
+}
+
+/* =========================================================================
+   LIST
+   ========================================================================= */
+
+.sizeGuide__list {
+	margin: 10px 0 0;
+	padding-left: 18px;
+	color: var(--text-soft);
+	line-height: 1.65;
+}
+
+.sizeGuide__list li {
+	margin: 6px 0;
+}
+
+/* =========================================================================
+   NOTICE
+   ========================================================================= */
+
+.sizeGuide__notice {
+	margin-top: 14px;
+	padding: 14px;
+	border: 1px solid var(--border);
+	border-radius: 0;
+	background: rgb(17 17 17 / 3%);
+}
+
+/* =========================================================================
+   TABLE
+   ========================================================================= */
+
+.sizeGuide__tableWrap {
+	width: 100%;
+	margin-top: 12px;
+	overflow: auto;
+	border: 1px solid var(--border);
+	border-radius: 0;
+}
+
+.sizeGuide__table {
+	width: 100%;
+	min-width: 620px;
+	border-collapse: collapse;
+	background: var(--c-white);
+}
+
+.sizeGuide__table thead th {
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--border);
+	background: rgb(17 17 17 / 2%);
+	font-size: 12px;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-align: left;
+	text-transform: uppercase;
+}
+
+.sizeGuide__table tbody th,
+.sizeGuide__table tbody td {
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--border-soft);
+	line-height: 1.45;
+	vertical-align: top;
+}
+
+.sizeGuide__table tbody th {
+	width: 30%;
+	color: var(--text);
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.sizeGuide__table tbody td {
+	color: var(--text-soft);
+}
+
+.sizeGuide__table tbody tr:last-child th,
+.sizeGuide__table tbody tr:last-child td {
+	border-bottom: none;
+}
+
+/* =========================================================================
+   FOOTNOTE
+   ========================================================================= */
+
+.sizeGuide__footnote {
+	margin: 12px 0 0;
+	color: var(--text-soft);
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+/* =========================================================================
+   MOBILE
+   ========================================================================= */
+
+@media (width <= 767px) {
+	.sizeGuide {
+		padding-top: calc(var(--header-height) - 6px);
+	}
+
+	.sizeGuide__tabs {
+		flex-direction: column;
+		gap: 10px;
+		margin: 22px 0 24px;
+	}
+
+	.sizeGuide__tab {
+		width: 100%;
+	}
+
+	.sizeGuide__block--visual {
+		grid-template-columns: 1fr;
+		gap: 20px;
+	}
+
+	.sizeGuide__heading,
+	.sizeGuide__measureTitle {
+		font-size: 14px;
+	}
+}

@@ -1,0 +1,14 @@
+Verify your email
+
+Hi {{ user.first_name|default:user.email }},
+
+Please verify your email to secure your account:
+
+{{ verify_url }}
+
+If you didn’t request this, you can ignore this email.
+
+Need help?
+Reply to this email or contact us at {{ support_email }}.
+
+— TRESSE
