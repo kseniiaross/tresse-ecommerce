@@ -163,9 +163,7 @@ else:
 # Password validation
 # ------------------------------------------------------------
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"
-    },
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
@@ -236,12 +234,8 @@ REST_FRAMEWORK = {
         "stripe_intent_anon": config("THROTTLE_STRIPE_INTENT_ANON", default="5/min"),
         "stripe_intent_user": config("THROTTLE_STRIPE_INTENT_USER", default="20/min"),
         # Back-in-stock subscription spam
-        "stock_subscribe_anon": config(
-            "THROTTLE_STOCK_SUBSCRIBE_ANON", default="5/min"
-        ),
-        "stock_subscribe_user": config(
-            "THROTTLE_STOCK_SUBSCRIBE_USER", default="20/min"
-        ),
+        "stock_subscribe_anon": config("THROTTLE_STOCK_SUBSCRIBE_ANON", default="5/min"),
+        "stock_subscribe_user": config("THROTTLE_STOCK_SUBSCRIBE_USER", default="20/min"),
     },
 }
 
@@ -252,9 +246,7 @@ SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(
         minutes=config("ACCESS_TOKEN_MINUTES", default=15, cast=int)
     ),
-    "REFRESH_TOKEN_LIFETIME": timedelta(
-        days=config("REFRESH_TOKEN_DAYS", default=7, cast=int)
-    ),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=config("REFRESH_TOKEN_DAYS", default=7, cast=int)),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "ALGORITHM": "HS256",
@@ -290,9 +282,7 @@ USE_STRIPE = config("USE_STRIPE", default=False, cast=bool)
 STRIPE_PUBLIC_KEY = config("STRIPE_PUBLIC_KEY", default="")
 STRIPE_SECRET_KEY = config("STRIPE_SECRET_KEY", default="")
 STRIPE_WEBHOOK_SECRET = config("STRIPE_WEBHOOK_SECRET", default="")
-STRIPE_FIRST_ORDER_COUPON_ID = config(
-    "STRIPE_FIRST_ORDER_COUPON_ID", default=""
-).strip()
+STRIPE_FIRST_ORDER_COUPON_ID = config("STRIPE_FIRST_ORDER_COUPON_ID", default="").strip()
 
 # ------------------------------------------------------------
 # reCAPTCHA
@@ -339,9 +329,7 @@ LOGGING = {
 }
 
 # Account restore window
-ACCOUNT_RESTORE_WINDOW_DAYS = config(
-    "ACCOUNT_RESTORE_WINDOW_DAYS", default=30, cast=int
-)
+ACCOUNT_RESTORE_WINDOW_DAYS = config("ACCOUNT_RESTORE_WINDOW_DAYS", default=30, cast=int)
 
 LOGIN_URL = "two_factor:login"
 LOGIN_REDIRECT_URL = "/admin/"
