@@ -1,200 +1,214 @@
-# TRESSE Online Store
+<div align="center">
 
-TRESSE Online Store is a modern full-stack e-commerce platform for handmade fashion products, built with a strong focus on accessibility (WCAG 2.1), performance, and real-world usability.
+# TRESSE
 
-The application is designed as a production-ready product, combining a clean, minimal interface with scalable architecture and secure data handling. The goal is not only to present products, but to guide users through a smooth and intuitive purchasing journey — from discovery to checkout.
+**A production e-commerce platform for handmade knitwear — built end-to-end, deployed live, and tested at every layer.**
 
-Live link: https://tressehandmade.com
+[![Live Site](https://img.shields.io/badge/live%20site-tressehandmade.com-black?style=flat-square)](https://tressehandmade.com/)
+[![CI](https://img.shields.io/github/actions/workflow/status/kseniiaross/tresse-ecommerce/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/kseniiaross/tresse-ecommerce/actions)
+![Tests](https://img.shields.io/badge/tests-317%20passing-brightgreen?style=flat-square)
+
+[Live Demo](https://tressehandmade.com/) · [Backend](./tresse_backend) · [Frontend](./tresse_frontend)
+
+</div>
 
 ---
 
-## Preview
+## Overview
 
-### Homepage
-![Homepage](docs/preview/homepage.png)
+TRESSE is a full-stack e-commerce site selling handmade knitwear, built with a **Django REST API** and a **React/TypeScript SPA**. It handles real money — live Stripe payments, inventory that can't oversell under concurrent load, and account security (JWT + optional 2FA) — and every one of those paths is covered by an automated test suite, not just eyeballed in the browser.
 
-### Email Subscribtion
-![Email](docs/preview/email.png)
+This isn't a tutorial clone. It's a real, deployed store with the messiness that comes with that: custom-length garments priced per centimeter, guest carts that merge into an account on login, back-in-stock notifications, self-serve returns within a policy window, and a checkout flow that has to stay correct even when two requests hit it at the same time.
 
+> **[tressehandmade.com](https://tressehandmade.com/)**
 
-### Product Catalog
-![Catalog](docs/preview/catalog.png)
-cart
-### Product Detail
-![Product](docs/preview/product.png)
+<!--
+## Screenshots
+Add 3–4 screenshots here once ready, e.g.:
 
-### Authentication
-![Auth](docs/preview/auth.png)
+| Home | Catalog | Checkout |
+|---|---|---|
+| ![home](docs/screenshots/home.png) | ![catalog](docs/screenshots/catalog.png) | ![checkout](docs/screenshots/checkout.png) |
+-->
 
-### Cart & Checkout
-![Cart](docs/preview/cart.png)
-![Checkout](docs/preview/checkout.png)
+---
+
+## Tech Stack
+
+<table>
+<tr>
+<td valign="top" width="50%">
+
+### Backend
+- **Django 6** + **Django REST Framework**
+- **PostgreSQL**
+- **Stripe** — checkout sessions, webhooks, refunds
+- **SimpleJWT** — token auth with rotation & blacklist
+- **django-otp** — two-factor authentication
+- **django-filter** — catalog filtering
+- **Cloudinary** — media storage
+- **Sentry** — error monitoring
+- **Anymail** — transactional email
+
+</td>
+<td valign="top" width="50%">
+
+### Frontend
+- **React 19** + **TypeScript**
+- **Redux Toolkit** — cart, auth, wishlist state
+- **React Router 7**
+- **React Hook Form** + **Yup** — form validation
+- **Stripe.js** / React Stripe Elements
+- **Axios**
+- **Vite**
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### Quality & Tooling (Backend)
+- **Ruff** — lint + format
+- **pytest** + **pytest-django**
+- **PostgreSQL** in CI (GitHub Actions service container)
+
+</td>
+<td valign="top">
+
+### Quality & Tooling (Frontend)
+- **Biome** — lint + format, including a11y rules
+- **Stylelint** — CSS
+- **Vitest** + **Testing Library** — unit/integration tests
+- **Playwright** — randomized stress ("monkey") testing
+
+</td>
+</tr>
+</table>
+
+**CI/CD:** GitHub Actions runs the full backend and frontend suites — lint, static checks, and tests — on every push.
 
 ---
 
 ## Key Features
 
-- Modern full-stack fashion e-commerce platform
-- Guest + authenticated cart system
-- JWT authentication with automatic token refresh
-- Real-time product filtering and search
-- Wishlist functionality
-- Product reviews and ratings
-- Secure Stripe checkout integration
-- Responsive and accessible UI (WCAG 2.1, Section 508)
-- Scalable full-stack architecture (React + Django)
+**Storefront**
+- Full product catalog with filtering, search, and sort
+- Size and color variant selection
+- Custom-length garments with per-centimeter surcharge pricing
+- Custom-measurement capture for made-to-order pieces
+- Wishlist with back-in-stock email notifications
+
+**Cart & Checkout**
+- Guest cart (localStorage) that automatically merges into the account cart on login
+- Server-side cart signature verification — prevents price or quantity tampering between the client and Stripe checkout
+- Real Stripe Checkout integration with webhook-driven order confirmation
+- Idempotent webhook handling — safe against Stripe's at-least-once delivery and duplicate events
+- Row-level stock locking to prevent overselling when multiple checkouts race for the same inventory
+
+**Account & Orders**
+- JWT authentication with token rotation and blacklist, optional 2FA
+- Rate-limited login/registration endpoints
+- Soft-delete account flow with a time-boxed, token-based restore link
+- Order history with self-serve cancellation (24-hour window) and returns (14-day window)
+
+**Accessibility**
+- Full keyboard navigation across dialogs, dropdowns, and menus
+- Managed focus (trap on open, restore on close) for every modal in the app
+- Semantic HTML and ARIA audited and enforced via linting, not just spot-checked
 
 ---
 
-## Product Experience
+## Testing
 
-The platform is designed around real user behavior and expectations in modern e-commerce:
+Testing here isn't a checkbox — it's how several real bugs in this codebase were actually found and fixed (see below). The suite spans backend business logic, frontend state and forms, full user flows, and unscripted stress testing.
 
-- Clear product presentation with structured catalog and filtering
-- Fast navigation with minimal friction between pages
-- Consistent UI across all devices
-- Seamless add-to-cart and checkout flow
-- Interface that responds instantly to user actions with clear feedback
-- Stable performance as product data grows
+| Layer | Tool | Coverage | Status |
+|---|---|---|---|
+| **Backend** | pytest | 114 tests — auth, orders & Stripe webhooks, cart/inventory, catalog, newsletter | ✅ passing |
+| **Frontend (unit/integration)** | Vitest + Testing Library | 203 tests across 16 files — Redux slices, API error handling, every major page and form | ✅ passing |
+| **Frontend (stress test)** | Playwright | 150 seeded randomized actions — clicks, garbage input, navigation, modal toggling | ✅ 0 crashes, 0 unhandled exceptions |
+| **Lint / static analysis** | Ruff · Biome (incl. a11y) · Stylelint | Full backend and frontend, including CSS | ✅ 0 errors |
 
-Each interaction is intentionally simplified to reduce cognitive load, improve usability, and increase conversion.
+### What's actually exercised
 
----
+- **The money path, end to end:** add to cart → Stripe checkout session → webhook confirmation → order creation, including duplicate-webhook idempotency and out-of-stock rejection under concurrent requests.
+- **Auth, the whole lifecycle:** registration, login, password reset and change, soft-delete, and time-boxed account restore.
+- **Cart correctness in both modes:** guest (localStorage) and authenticated (server), including the merge-on-login flow and price recalculation for custom-length items.
+- **Every major page:** catalog, product detail, cart, checkout, order history, wishlist, dashboard — rendered, interacted with, and asserted against real component markup, not just smoke-tested.
+- **Randomized stress testing:** a seeded Playwright script performs 150 unscripted actions — including feeding form inputs deliberately malformed data (extreme-length numbers, null bytes, control characters) — specifically to catch the crashes that hand-written test cases don't think to look for. Latest run: zero crashes, zero blank pages, zero unhandled exceptions. Reproducible with `npm run test:monkey`.
 
-## Shopping Flow
+### Bugs found and fixed through testing
 
-The platform provides a complete shopping experience from product discovery to secure checkout.
+Writing this suite surfaced real defects, not just markup mismatches:
 
-Users can browse the catalog, filter products, view detailed product pages, add items to the cart, manage wishlist items, and complete purchases through Stripe.
-
-The system supports both guest users and authenticated users, allowing customers to interact with products before creating an account. Guest cart data is stored locally, while authenticated users have their cart managed through the backend.
-
-This approach reduces friction, improves user retention, and creates a smoother purchase journey.
-
----
-
-## Catalog and Product Management
-
-The product catalog is designed to support scalable product growth and real-world e-commerce needs.
-
-The catalog includes:
-
-- Product categories and structured navigation
-- Product detail pages with images and descriptions
-- Product availability and stock-related data
-- Search and filtering functionality
-- Wishlist interaction
-- Product reviews and ratings
-
-This structure allows users to discover products quickly while giving the application a flexible foundation for future catalog expansion.
+- **A focus-management race condition was silently truncating user input** in modal forms (e.g. the "notify me when back in stock" email field). Every parent re-render handed the dialog a fresh close-handler reference, which re-triggered a focus effect and yanked keyboard focus back into the dialog after every keystroke — so a user could type only one character before losing focus entirely. Root-caused to a `useEffect` dependency issue, fixed by moving the handler behind a ref so the effect only re-runs on the dialog's own open/close state, and generalized into a shared hook applied across every modal in the app.
+- **Server-side validation messages were being silently discarded** on the login and registration forms. The API layer correctly extracted a specific, actionable error (e.g. "that email is already registered"), but the UI components re-wrapped it in a way that could never actually surface it — every failure, regardless of cause, fell back to a generic message. Traced to the exact point in the error-handling chain where the message was lost and fixed on both forms so users see the real reason a submission failed.
 
 ---
 
-## Technical Challenges & Solutions
+## Getting Started
 
-**1. Guest vs authenticated cart logic**  
-Implemented a dual cart system using localStorage for guest users and backend storage for authenticated users, with seamless synchronization after login.
-
-**2. Token expiration handling**  
-Prevented session interruptions by implementing Axios interceptors with automatic JWT refresh logic.
-
-**3. Protected user flows**  
-Implemented protected frontend routes for pages and actions that require authentication, while still allowing guest users to browse products and build a cart.
-
-**4. Scalable product architecture**  
-Designed the product structure to support categories, filtering, product details, wishlist functionality, reviews, ratings, and future catalog expansion.
-
----
-
-## Security and Data Handling
-
-Security is treated as a core part of the product, not an afterthought.
-
-- Authentication is implemented using JWT (access and refresh tokens)
-- Tokens are securely managed and automatically refreshed
-- Sensitive operations are protected through backend validation
-- Protected routes prevent unauthorized access to restricted pages
-- No payment data is stored on the client side
-- Payment processing is handled by Stripe (PCI-compliant)
-
-This approach ensures that user data is protected and the system is ready for real-world usage.
-
----
-
-## Performance and Reliability
-
-The application is optimized to provide a fast and stable experience:
-
-- Efficient state management using Redux Toolkit
-- Optimized API communication through a centralized Axios instance
-- Automatic token refresh without interrupting user sessions
-- Clean and modular component architecture
-- Production build optimized with Vite
-- Responsive rendering across desktop and mobile devices
-
-The system is designed to scale without degrading performance or user experience.
-
----
-
-## Architecture
-
-The project follows a full-stack architecture with clear separation of concerns.
-
-### Frontend
-- React with TypeScript
-- Redux Toolkit for state management
-- React Router for navigation
-- Axios with interceptors for API handling
-- Vite for fast development and optimized production builds
+### Prerequisites
+- Python 3.12+, Node 22+, PostgreSQL
 
 ### Backend
-- Django REST Framework
-- PostgreSQL database
-- Token-based authentication (JWT)
-- RESTful API structure
+```bash
+cd tresse_backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env      # fill in SECRET_KEY, DB credentials, Stripe keys, etc.
+python manage.py migrate
+python manage.py runserver
+```
 
-This structure allows the product to evolve easily, supporting future features such as analytics, admin tools, marketing flows, and expanded product management.
+### Frontend
+```bash
+cd tresse_frontend
+npm install
+cp .env.example .env      # fill in VITE_API_URL, Stripe publishable key, etc.
+npm run dev
+```
 
----
+### Running the test suite
+```bash
+# Backend
+cd tresse_backend && pytest
 
-## Accessibility
-
-Accessibility is treated as a core product requirement rather than a compliance checkbox.
-
-The platform is designed with WCAG 2.1 and Section 508 standards in mind, ensuring that users with different abilities can interact with the product without barriers.
-
-Key accessibility considerations include:
-
-- Semantic HTML structure for screen reader compatibility
-- Full keyboard navigation support
-- Proper focus management and visible focus states
-- ARIA attributes to enhance assistive technology support
-- High-contrast and readable UI elements
-- Responsive layouts for different devices and screen sizes
-
-Accessibility decisions are integrated into the development process from the start, improving usability for all users.
-
----
-
-## Business Value
-
-This project demonstrates the ability to build a real-world e-commerce product focused on measurable outcomes:
-
-- Improving product discovery through structured catalog navigation
-- Reducing friction in the purchase flow
-- Ensuring secure handling of user data
-- Building a scalable and maintainable frontend architecture
-- Delivering a production-ready user experience
-- Supporting real commercial features such as cart, wishlist, checkout, and authentication
-
-The result is not a demo application, but a functional foundation for a commercial product.
+# Frontend
+cd tresse_frontend
+npm run test:run      # unit/integration tests
+npm run lint            # Biome, including accessibility rules
+npm run test:monkey     # randomized stress test
+```
 
 ---
 
-## Author
+## Project Structure
 
-Kseniia Rostovskaia  
-Full-Stack Developer
+```
+tresse-ecommerce/
+├── tresse_backend/              Django REST API
+│   ├── accounts/                 Auth, profiles, 2FA
+│   ├── orders/                    Orders, Stripe checkout & webhooks
+│   ├── products/                   Catalog, cart, wishlist
+│   └── newsletter/
+├── tresse_frontend/              React + TypeScript SPA
+│   ├── src/
+│   │   ├── components/             Auth forms, modals
+│   │   ├── view/                    Page-level components
+│   │   ├── store/                    Redux slices
+│   │   └── api/                       Axios client & endpoints
+│   └── e2e/                        Playwright stress test
+└── .github/workflows/            CI (backend + frontend)
+```
 
-Portfolio: https://kseniiaross.dev  
+---
+
+<div align="center">
+
+Built by [Kseniia Rostovskaia](https://kseniiaross.dev)
+
 LinkedIn: https://www.linkedin.com/in/kseniia-rostovskaia
+
+
+</div>
