@@ -16,20 +16,14 @@
 
 ## Overview
 
+![Home page](tresse_frontend/docs/screenshots/home.png)
+
 TRESSE is a full-stack e-commerce site selling handmade knitwear, built with a **Django REST API** and a **React/TypeScript SPA**. It handles real money — live Stripe payments, inventory that can't oversell under concurrent load, and account security (JWT + optional 2FA) — and every one of those paths is covered by an automated test suite, not just eyeballed in the browser.
 
 This isn't a tutorial clone. It's a real, deployed store with the messiness that comes with that: custom-length garments priced per centimeter, guest carts that merge into an account on login, back-in-stock notifications, self-serve returns within a policy window, and a checkout flow that has to stay correct even when two requests hit it at the same time.
 
 > **[tressehandmade.com](https://tressehandmade.com/)**
 
-<!--
-## Screenshots
-Add 3–4 screenshots here once ready, e.g.:
-
-| Home | Catalog | Checkout |
-|---|---|---|
-| ![home](docs/screenshots/home.png) | ![catalog](docs/screenshots/catalog.png) | ![checkout](docs/screenshots/checkout.png) |
--->
 
 ---
 
@@ -92,6 +86,10 @@ Add 3–4 screenshots here once ready, e.g.:
 ## Key Features
 
 **Storefront**
+
+![Catalog page](tresse_frontend/docs/screenshots/catalog.png)
+
+
 - Full product catalog with filtering, search, and sort
 - Size and color variant selection
 - Custom-length garments with per-centimeter surcharge pricing
@@ -99,6 +97,9 @@ Add 3–4 screenshots here once ready, e.g.:
 - Wishlist with back-in-stock email notifications
 
 **Cart & Checkout**
+
+![Checkout page](tresse_frontend/docs/screenshots/checkout.png)
+
 - Guest cart (localStorage) that automatically merges into the account cart on login
 - Server-side cart signature verification — prevents price or quantity tampering between the client and Stripe checkout
 - Real Stripe Checkout integration with webhook-driven order confirmation
@@ -106,6 +107,7 @@ Add 3–4 screenshots here once ready, e.g.:
 - Row-level stock locking to prevent overselling when multiple checkouts race for the same inventory
 
 **Account & Orders**
+
 - JWT authentication with token rotation and blacklist, optional 2FA
 - Rate-limited login/registration endpoints
 - Soft-delete account flow with a time-boxed, token-based restore link

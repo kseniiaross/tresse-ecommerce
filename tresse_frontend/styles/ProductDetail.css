@@ -1,8 +1,8 @@
 .product-detail {
 	--header-offset: 20px;
 	--thumb-gap: 12px;
-	--thumb-width: 78px;
-	--thumb-height: 102px;
+	--thumb-width: 58px;
+	--thumb-height: calc(var(--thumb-width) * 16 / 9);
 	--gallery-width: calc((var(--thumb-width) * 4) + (var(--thumb-gap) * 3));
 
 	width: 100%;
@@ -18,7 +18,6 @@
 	padding: 0 48px 60px;
 	box-sizing: border-box;
 	align-items: start;
-	transform: translateY(-18px);
 }
 
 /* =========================
@@ -37,11 +36,22 @@
 	max-width: 100%;
 }
 
+/*
+ * All product photography is 9:16. The box below is sized to that exact
+ * ratio, so `object-fit` never has to letterbox/pillarbox — the image
+ * always fills its box completely.
+ *
+ * Width is the SMALLER of:
+ *   1) the width implied by the thumbnail row (100% of .product-detail__gallery)
+ *   2) the width that keeps the box within the vertical budget
+ * This keeps the ratio intact at every viewport instead of letting
+ * max-height clip the box and break the aspect-ratio.
+ */
 .product-detail__main-image {
 	position: relative;
-	width: 100%;
-	aspect-ratio: 4 / 5;
-	max-height: calc(100svh - var(--header-offset) - var(--thumb-height) - 56px);
+	--v-budget: calc(100svh - var(--header-offset) - var(--thumb-height) - 56px);
+	width: min(100%, calc(var(--v-budget) * 9 / 16));
+	aspect-ratio: 9 / 16;
 	background: transparent;
 	border: none;
 	overflow: hidden;
@@ -101,7 +111,7 @@
 .product-detail__thumb {
 	flex: 0 0 auto;
 	width: var(--thumb-width);
-	height: var(--thumb-height);
+	aspect-ratio: 9 / 16;
 	padding: 0;
 	border: 1px solid transparent;
 	background: transparent;
@@ -118,8 +128,8 @@
 	width: 100%;
 	height: 100%;
 	display: block;
-	object-fit: cover;
-	object-position: center top;
+	object-fit: contain;
+	object-position: center;
 }
 
 .product-detail__thumb:hover {
@@ -566,12 +576,13 @@
 }
 
 /* =========================
-   LARGE DESKTOP
+   LARGE DESKTOP  (>= 1600px)
    ========================= */
 
 @media (width >= 1600px) {
 	.product-detail {
 		--header-offset: 56px;
+		--thumb-width: 62px;
 	}
 
 	.product-detail__wrap {
@@ -581,27 +592,16 @@
 			minmax(580px, 720px)
 			minmax(460px, 560px);
 		gap: 120px;
-		align-items: start;
 		padding-left: 80px;
 		padding-right: 80px;
-		transform: translateY(-24px);
 	}
 
 	.product-detail__media {
 		justify-content: flex-start;
 	}
 
-	.product-detail__gallery {
-		width: clamp(540px, 35vw, 700px);
-	}
-
 	.product-detail__main-image {
-		max-height: calc(
-			100svh -
-			var(--header-offset) -
-			var(--thumb-height) -
-			120px
-		);
+		--v-budget: calc(100svh - var(--header-offset) - var(--thumb-height) - 120px);
 	}
 
 	.product-detail__thumbs {
@@ -614,30 +614,12 @@
 }
 
 /* =========================
-   DESKTOP 1200–1599
-   ========================= */
-
-@media (width >= 1200px) and (width <= 1599px) {
-	.product-detail__wrap {
-		gap: 72px;
-		align-items: start;
-	}
-
-	.product-detail__media {
-		padding-top: 0;
-		transform: translateY(0);
-	}
-}
-
-/* =========================
-   LAPTOP
+   LAPTOP  (<= 1200px)
    ========================= */
 
 @media (width <= 1200px) {
 	.product-detail {
-		--thumb-width: 62px;
-		--thumb-height: 78px;
-		--gallery-width: calc((var(--thumb-width) * 4) + (var(--thumb-gap) * 3));
+		--thumb-width: 50px;
 	}
 
 	.product-detail__wrap {
@@ -648,14 +630,13 @@
 }
 
 /* =========================
-   TABLET
+   TABLET  (<= 1024px)
    ========================= */
 
 @media (width <= 1024px) {
 	.product-detail {
 		--header-offset: 78px;
-		--thumb-width: 68px;
-		--thumb-height: 86px;
+		--thumb-width: 56px;
 		--gallery-width: min(
 			100%,
 			calc((var(--thumb-width) * 4) + (var(--thumb-gap) * 3))
@@ -680,7 +661,7 @@
 	}
 
 	.product-detail__main-image {
-		max-height: 640px;
+		--v-budget: 640px;
 	}
 
 	.product-detail__size-grid {
@@ -695,16 +676,14 @@
 }
 
 /* =========================
-   MOBILE
+   MOBILE  (<= 520px)
    ========================= */
 
 @media (width <= 520px) {
 	.product-detail {
 		--header-offset: 82px;
 		--thumb-gap: 8px;
-		--thumb-width: 54px;
-		--thumb-height: 70px;
-		--gallery-width: calc((var(--thumb-width) * 4) + (var(--thumb-gap) * 3));
+		--thumb-width: 42px;
 	}
 
 	.product-detail__wrap {
@@ -713,7 +692,7 @@
 	}
 
 	.product-detail__main-image {
-		max-height: 520px;
+		--v-budget: 520px;
 	}
 
 	.product-detail__badge {
