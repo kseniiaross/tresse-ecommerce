@@ -3,7 +3,7 @@
 	--thumb-gap: 12px;
 	--thumb-width: 58px;
 	--thumb-height: calc(var(--thumb-width) * 16 / 9);
-	--gallery-width: calc((var(--thumb-width) * 4) + (var(--thumb-gap) * 3));
+	--media-width: 400px;
 
 	width: 100%;
 	box-sizing: border-box;
@@ -32,7 +32,7 @@
 }
 
 .product-detail__gallery {
-	width: var(--gallery-width);
+	width: var(--media-width);
 	max-width: 100%;
 }
 
@@ -42,10 +42,12 @@
  * always fills its box completely.
  *
  * Width is the SMALLER of:
- *   1) the width implied by the thumbnail row (100% of .product-detail__gallery)
+ *   1) --media-width for the current breakpoint (100% of .product-detail__gallery)
  *   2) the width that keeps the box within the vertical budget
  * This keeps the ratio intact at every viewport instead of letting
- * max-height clip the box and break the aspect-ratio.
+ * max-height clip the box and break the aspect-ratio. Thumbnail sizing
+ * (--thumb-width) is intentionally independent of this — the thumbnail
+ * row doesn't need to span the same width as the hero image.
  */
 .product-detail__main-image {
 	position: relative;
@@ -583,6 +585,7 @@
 	.product-detail {
 		--header-offset: 56px;
 		--thumb-width: 62px;
+		--media-width: 620px;
 	}
 
 	.product-detail__wrap {
@@ -625,6 +628,7 @@
 @media (width <= 1200px) {
 	.product-detail {
 		--thumb-width: 50px;
+		--media-width: 340px;
 	}
 
 	.product-detail__wrap {
@@ -642,10 +646,7 @@
 	.product-detail {
 		--header-offset: 78px;
 		--thumb-width: 56px;
-		--gallery-width: min(
-			100%,
-			calc((var(--thumb-width) * 4) + (var(--thumb-gap) * 3))
-		);
+		--media-width: min(100%, 480px);
 	}
 
 	.product-detail__wrap {
@@ -689,6 +690,7 @@
 		--header-offset: 82px;
 		--thumb-gap: 8px;
 		--thumb-width: 42px;
+		--media-width: min(100%, 420px);
 	}
 
 	.product-detail__wrap {
