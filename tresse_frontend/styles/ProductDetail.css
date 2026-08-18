@@ -599,10 +599,6 @@
 		padding-right: 80px;
 	}
 
-	.product-detail__media {
-		justify-content: flex-start;
-	}
-
 	.product-detail__main-image {
 		--v-budget: calc(
 			100svh -
