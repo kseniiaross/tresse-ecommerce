@@ -601,7 +601,12 @@
 	}
 
 	.product-detail__main-image {
-		--v-budget: calc(100svh - var(--header-offset) - var(--thumb-height) - 120px);
+		--v-budget: calc(
+			100svh -
+			var(--header-offset) -
+			var(--thumb-height) -
+			120px
+		);
 	}
 
 	.product-detail__thumbs {
