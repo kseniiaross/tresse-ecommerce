@@ -12,11 +12,12 @@
 		"test:monkey": "playwright test e2e/monkey-test.spec.ts",
 		"lint": "biome check .",
 		"prepare": "husky"
-		},
-		"lint-staged": {
-			"*.{js,jsx,ts,tsx,css,json}": ["biome check --write --no-errors-on-unmatched"]
-		},
-		
+	},
+	"lint-staged": {
+		"*.{js,jsx,ts,tsx,css,json}": [
+			"biome check --write --no-errors-on-unmatched"
+		]
+	},
 	"dependencies": {
 		"@dnd-kit/core": "^6.3.1",
 		"@dnd-kit/sortable": "^10.0.0",
