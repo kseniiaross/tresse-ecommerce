@@ -2,11 +2,12 @@
 
 # TRESSE
 
-**A production e-commerce platform for handmade knitwear — built end-to-end, deployed live, and tested at every layer.**
+**Full-stack e-commerce platform** for handmade knitwear — React frontend + Django REST API backend, deployed live, and tested at every layer.
 
 [![Live Site](https://img.shields.io/badge/live%20site-tressehandmade.com-black?style=flat-square)](https://tressehandmade.com/)
 [![CI](https://img.shields.io/github/actions/workflow/status/kseniiaross/tresse-ecommerce/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/kseniiaross/tresse-ecommerce/actions)
 ![Tests](https://img.shields.io/badge/tests-317%20passing-brightgreen?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](./LICENSE)
 
 [Live Demo](https://tressehandmade.com/) · [Backend](./tresse_backend) · [Frontend](./tresse_frontend)
 
@@ -204,12 +205,17 @@ tresse-ecommerce/
 └── .github/workflows/            CI (backend + frontend)
 ```
 
+
+
+## License
+
+MIT — see [LICENSE](./LICENSE) for details.
+
 ---
 
 <div align="center">
 
 Built by [Kseniia Rostovskaia](https://kseniiaross.dev)
-
 LinkedIn: https://www.linkedin.com/in/kseniia-rostovskaia
 
 
