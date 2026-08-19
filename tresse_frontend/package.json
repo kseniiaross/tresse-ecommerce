@@ -1,58 +1,58 @@
 {
-  "name": "tresse-frontend",
-  "version": "1.0.0",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test",
-    "test:monkey": "playwright test e2e/monkey-test.spec.ts",
-    "lint": "biome check .",
-    "prepare": "husky"
-  },
-  "lint-staged": {
-    "*.{js,jsx,ts,tsx,css,json}": [
-      "biome check --write --no-errors-on-unmatched"
-    ]
-  },
-  "dependencies": {
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
-    "@hookform/resolvers": "^5.0.1",
-    "@react-google-maps/api": "^2.20.8",
-    "@reduxjs/toolkit": "^2.6.1",
-    "@stripe/react-stripe-js": "^5.3.0",
-    "@stripe/stripe-js": "^8.3.0",
-    "axios": "^1.13.2",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "react-hook-form": "^7.55.0",
-    "react-redux": "^9.2.0",
-    "react-router-dom": "^7.5.0",
-    "yup": "^1.6.1"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.5.7",
-    "@playwright/test": "^1.62.1",
-    "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.3",
-    "@types/react": "^19.1.1",
-    "@types/react-dom": "^19.1.2",
-    "@types/react-redux": "^7.1.34",
-    "@vitejs/plugin-react": "^5.1.2",
-    "@vitest/coverage-v8": "^4.1.10",
-    "husky": "^9.1.7",
-    "jsdom": "^29.1.1",
-    "lint-staged": "^16.4.0",
-    "stylelint": "^17.14.1",
-    "stylelint-config-standard": "^40.0.0",
-    "typescript": "^5.8.3",
-    "vite": "^7.3.0",
-    "vitest": "^4.1.10"
-  }
+	"name": "tresse-frontend",
+	"version": "1.0.0",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview",
+		"test": "vitest",
+		"test:run": "vitest run",
+		"test:coverage": "vitest run --coverage",
+		"test:e2e": "playwright test",
+		"test:monkey": "playwright test e2e/monkey-test.spec.ts",
+		"lint": "biome check .",
+		"prepare": "husky"
+	},
+	"lint-staged": {
+		"*.{js,jsx,ts,tsx,css,json}": [
+			"biome check --write --no-errors-on-unmatched"
+		]
+	},
+	"dependencies": {
+		"@dnd-kit/core": "^6.3.1",
+		"@dnd-kit/sortable": "^10.0.0",
+		"@dnd-kit/utilities": "^3.2.2",
+		"@hookform/resolvers": "^5.0.1",
+		"@react-google-maps/api": "^2.20.8",
+		"@reduxjs/toolkit": "^2.6.1",
+		"@stripe/react-stripe-js": "^5.3.0",
+		"@stripe/stripe-js": "^8.3.0",
+		"axios": "^1.13.2",
+		"react": "^19.2.3",
+		"react-dom": "^19.2.3",
+		"react-hook-form": "^7.55.0",
+		"react-redux": "^9.2.0",
+		"react-router-dom": "^7.5.0",
+		"yup": "^1.6.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.7",
+		"@playwright/test": "^1.62.1",
+		"@testing-library/jest-dom": "^7.0.1",
+		"@testing-library/react": "^16.3.2",
+		"@testing-library/user-event": "^14.6.3",
+		"@types/react": "^19.1.1",
+		"@types/react-dom": "^19.1.2",
+		"@types/react-redux": "^7.1.34",
+		"@vitejs/plugin-react": "^5.1.2",
+		"@vitest/coverage-v8": "^4.1.10",
+		"husky": "^9.1.7",
+		"jsdom": "^29.1.1",
+		"lint-staged": "^16.4.0",
+		"stylelint": "^17.14.1",
+		"stylelint-config-standard": "^40.0.0",
+		"typescript": "^5.8.3",
+		"vite": "^7.3.0",
+		"vitest": "^4.1.10"
+	}
 }
