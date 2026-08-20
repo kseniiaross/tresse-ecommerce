@@ -751,19 +751,83 @@
 }
 
 /* =========================================================================
-   LARGE DESKTOP 1600+
+   COMING SOON MODAL
    ========================================================================= */
 
-@media (width >= 1600px) {
-	.catalog {
-		padding-top: 8px;
-	}
+.comingSoonModal {
+	position: relative;
+	width: min(440px, 100%);
+	overflow: hidden;
+	border: 1px solid rgb(0 0 0 / 10%);
+	border-radius: 0;
+	background: var(--surface);
+	box-shadow: var(--shadow-modal-lg);
 }
 
-@media (hover: none) {
-	.catalog__card:hover .catalog__carousel {
-		animation: none;
-	}
+.comingSoonModal__close {
+	position: absolute;
+	top: 14px;
+	right: 14px;
+	width: 34px;
+	height: 34px;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: 0;
+	background: var(--surface);
+	color: var(--text);
+	font: inherit;
+	font-size: 20px;
+	line-height: 1;
+	cursor: pointer;
+	transition:
+		background-color 0.2s ease,
+		border-color 0.2s ease;
+}
+
+.comingSoonModal__close:hover {
+	border-color: rgb(0 0 0 / 18%);
+	background: var(--surface-soft);
+}
+
+.comingSoonModal__body {
+	padding: 56px 32px 40px;
+	text-align: center;
+}
+
+.comingSoonModal__title {
+	margin: 0 0 12px;
+	color: var(--text);
+	font-size: 20px;
+	font-weight: 500;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+}
+
+.comingSoonModal__text {
+	margin: 0 0 28px;
+	color: var(--text-secondary);
+	font-size: 14px;
+	line-height: 1.65;
+}
+
+.comingSoonModal__btn {
+	display: inline-block;
+	padding: 12px 28px;
+	border: 1px solid #111;
+	border-radius: 0;
+	background: #111;
+	color: #fff;
+	font-family: inherit;
+	font-size: 12px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	text-decoration: none;
+	cursor: pointer;
+	transition: opacity 0.2s ease;
+}
+
+.comingSoonModal__btn:hover {
+	opacity: 0.86;
 }
 
 /* =========================================================================
@@ -777,6 +841,12 @@
 
 	.catalog__media {
 		height: clamp(560px, calc(100dvh - var(--header-height) - 180px), 780px);
+	}
+}
+
+@media (hover: none) {
+	.catalog__card:hover .catalog__carousel {
+		animation: none;
 	}
 }
 

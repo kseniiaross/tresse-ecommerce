@@ -105,6 +105,11 @@ type CustomLengthModalProps = {
 	onChooseCustom: (pending: PendingCartSelection) => void;
 };
 
+type ComingSoonModalProps = {
+	categoryLabel: string;
+	onClose: () => void;
+};
+
 const isValidEmail = (email: string): boolean => {
 	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 };
@@ -760,6 +765,54 @@ function CustomLengthModal({
 	);
 }
 
+function ComingSoonModal({ categoryLabel, onClose }: ComingSoonModalProps) {
+	const overlayRef = useRef<HTMLDivElement>(null);
+	const contentRef = useRef<HTMLDivElement>(null);
+
+	useDialogDismiss(overlayRef, contentRef, onClose);
+
+	return (
+		<div className="sizeModal__overlay" ref={overlayRef}>
+			<div
+				className="comingSoonModal"
+				ref={contentRef}
+				tabIndex={-1}
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="comingSoonModalTitle"
+			>
+				<button
+					type="button"
+					className="comingSoonModal__close"
+					onClick={onClose}
+					aria-label="Close"
+				>
+					×
+				</button>
+
+				<div className="comingSoonModal__body">
+					<h3 id="comingSoonModalTitle" className="comingSoonModal__title">
+						{categoryLabel} — Coming Soon!
+					</h3>
+
+					<p className="comingSoonModal__text">
+						We’re still knitting this collection together. Check back soon — or
+						explore what’s available now.
+					</p>
+
+					<Link
+						to="/catalog?category=woman"
+						className="comingSoonModal__btn"
+						onClick={onClose}
+					>
+						Shop Woman
+					</Link>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 export default function ProductCatalog() {
 	const navigate = useNavigate();
 
@@ -776,6 +829,10 @@ export default function ProductCatalog() {
 		collection,
 		search: urlSearch,
 	} = useMemo(() => readFilters(location.search), [location.search]);
+
+	const isComingSoonCategory = category === "man" || category === "kids";
+
+	const comingSoonLabel = category === "man" ? "Man" : "Kids";
 
 	const [searchTerm, setSearchTerm] = useState<string>(urlSearch);
 
@@ -885,6 +942,14 @@ export default function ProductCatalog() {
 	}, [urlSearch]);
 
 	useEffect(() => {
+		if (isComingSoonCategory) {
+			setAllProducts([]);
+			setLoading(false);
+			setLoadError("");
+
+			return;
+		}
+
 		let cancelled = false;
 
 		const timer = window.setTimeout(() => {
@@ -994,6 +1059,7 @@ export default function ProductCatalog() {
 		minPrice,
 		maxPrice,
 		ordering,
+		isComingSoonCategory,
 	]);
 
 	const products = useMemo<Product[]>(() => {
@@ -1297,6 +1363,17 @@ export default function ProductCatalog() {
 			true,
 		);
 	};
+
+	if (isComingSoonCategory) {
+		return (
+			<section className="catalog" aria-label="Product catalog">
+				<ComingSoonModal
+					categoryLabel={comingSoonLabel}
+					onClose={() => navigate("/catalog?category=woman")}
+				/>
+			</section>
+		);
+	}
 
 	return (
 		<section className="catalog" aria-label="Product catalog">
