@@ -288,7 +288,7 @@ describe("ProductCatalog - category subnav", () => {
 
 		renderCatalog("/catalog?category=man");
 
-		await screen.findByText(/no products found/i);
+		await screen.findByText(/coming soon/i);
 		expect(screen.queryByText("SUMMER")).not.toBeInTheDocument();
 	});
 });
