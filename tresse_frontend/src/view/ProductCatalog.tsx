@@ -1695,4 +1695,3 @@ export default function ProductCatalog() {
 		</section>
 	);
 }
-
