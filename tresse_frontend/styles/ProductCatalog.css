@@ -754,6 +754,17 @@
    COMING SOON MODAL
    ========================================================================= */
 
+.comingSoonModal__overlay {
+	position: fixed;
+	inset: 0;
+	z-index: var(--z-modal);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 18px;
+	background: transparent;
+}
+
 .comingSoonModal {
 	position: relative;
 	width: min(440px, 100%);
@@ -790,44 +801,26 @@
 }
 
 .comingSoonModal__body {
-	padding: 56px 32px 40px;
+	padding: 56px 32px 48px;
 	text-align: center;
 }
 
 .comingSoonModal__title {
-	margin: 0 0 12px;
+	margin: 0 0 14px;
 	color: var(--text);
-	font-size: 20px;
+	font-family: var(--font-luxury);
+	font-size: 26px;
 	font-weight: 500;
-	letter-spacing: 0.14em;
+	letter-spacing: 0.16em;
 	text-transform: uppercase;
 }
 
 .comingSoonModal__text {
-	margin: 0 0 28px;
+	margin: 0;
 	color: var(--text-secondary);
+	font-family: var(--font-luxury);
 	font-size: 14px;
 	line-height: 1.65;
-}
-
-.comingSoonModal__btn {
-	display: inline-block;
-	padding: 12px 28px;
-	border: 1px solid #111;
-	border-radius: 0;
-	background: #111;
-	color: #fff;
-	font-family: inherit;
-	font-size: 12px;
-	letter-spacing: 0.1em;
-	text-transform: uppercase;
-	text-decoration: none;
-	cursor: pointer;
-	transition: opacity 0.2s ease;
-}
-
-.comingSoonModal__btn:hover {
-	opacity: 0.86;
 }
 
 /* =========================================================================

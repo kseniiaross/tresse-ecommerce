@@ -772,7 +772,7 @@ function ComingSoonModal({ categoryLabel, onClose }: ComingSoonModalProps) {
 	useDialogDismiss(overlayRef, contentRef, onClose);
 
 	return (
-		<div className="sizeModal__overlay" ref={overlayRef}>
+		<div className="comingSoonModal__overlay" ref={overlayRef}>
 			<div
 				className="comingSoonModal"
 				ref={contentRef}
@@ -799,14 +799,6 @@ function ComingSoonModal({ categoryLabel, onClose }: ComingSoonModalProps) {
 						We’re still knitting this collection together. Check back soon — or
 						explore what’s available now.
 					</p>
-
-					<Link
-						to="/catalog?category=woman"
-						className="comingSoonModal__btn"
-						onClick={onClose}
-					>
-						Shop Woman
-					</Link>
 				</div>
 			</div>
 		</div>
@@ -1369,7 +1361,7 @@ export default function ProductCatalog() {
 			<section className="catalog" aria-label="Product catalog">
 				<ComingSoonModal
 					categoryLabel={comingSoonLabel}
-					onClose={() => navigate("/catalog?category=woman")}
+					onClose={() => navigate("/")}
 				/>
 			</section>
 		);
