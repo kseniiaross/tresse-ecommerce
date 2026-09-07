@@ -8,6 +8,7 @@ import {
 	getAccessToken,
 	getRefreshToken,
 	setAccessToken,
+	setRefreshToken,
 } from "../types/token";
 
 const rawEnv =
@@ -59,7 +60,7 @@ axiosInstance.interceptors.request.use((config) => {
 
 /* ================= Refresh logic ================= */
 
-type RefreshResponse = { access: string };
+type RefreshResponse = { access: string; refresh?: string };
 
 let isRefreshing = false;
 let refreshQueue: Array<(token: string | null) => void> = [];
@@ -88,6 +89,11 @@ async function refreshAccessToken(): Promise<string> {
 	if (!access) throw new Error("No access token in refresh response");
 
 	setAccessToken(access);
+
+	if (resp.data?.refresh) {
+		setRefreshToken(resp.data.refresh);
+	}
+
 	return access;
 }
 
