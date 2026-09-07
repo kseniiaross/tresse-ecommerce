@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock, patch
 
 from django.db import IntegrityError
+from django.template.loader import render_to_string
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
@@ -120,3 +121,24 @@ class SubscribeAPITestCase(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertFalse(resp.data["email_sent"])
         self.assertTrue(NewsletterSubscriber.objects.filter(email="resilient@example.com").exists())
+
+
+class NewsletterWelcomeTemplateRenderTestCase(TestCase):
+    """Renders the real templates (no render_to_string mock) with the exact
+    context newsletter/views.py builds, to catch missing-variable bugs that
+    a mocked render would hide."""
+
+    def _context(self):
+        return {"email": "new@example.com", "source": "footer", "brand": "TRESSE"}
+
+    def test_txt_template_has_no_missing_substitutions(self):
+        text_body = render_to_string("emails/accounts/newsletter_welcome.txt", self._context())
+        self.assertNotIn("Hi ,", text_body)
+        self.assertNotIn("{{", text_body)
+        self.assertNotIn("}}", text_body)
+
+    def test_html_template_has_no_missing_substitutions(self):
+        html_body = render_to_string("emails/accounts/newsletter_welcome.html", self._context())
+        self.assertNotIn("Hi ,", html_body)
+        self.assertNotIn("{{", html_body)
+        self.assertNotIn("}}", html_body)

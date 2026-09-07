@@ -1,7 +1,8 @@
-Hi {{ name }},
 Welcome to TRESSE
 
 Thank you for subscribing to our newsletter.
-You’ll receive updates about new collections and exclusive offers.
+You’ll be the first to know about new collections, limited releases and exclusive offers.
 
 — TRESSE
+
+If you didn’t subscribe, just ignore this email.
