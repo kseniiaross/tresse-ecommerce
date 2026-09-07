@@ -77,7 +77,7 @@ export default function Order() {
 
 		const checkOrderHistory = async () => {
 			try {
-				const { data } = await api.get("/orders/my-orders/");
+				const { data } = await api.get("/orders/my/");
 
 				const orders = Array.isArray(data) ? data : [];
 
