@@ -12,12 +12,14 @@ from rest_framework.views import APIView
 
 from .models import NewsletterSubscriber
 from .serializers import NewsletterSubscribeSerializer
+from .throttles import NewsletterAnonThrottle
 
 logger = logging.getLogger(__name__)
 
 
 class SubscribeAPIView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [NewsletterAnonThrottle]
 
     def post(self, request):
         serializer = NewsletterSubscribeSerializer(data=request.data)
@@ -32,11 +34,13 @@ class SubscribeAPIView(APIView):
                 defaults={"source": source, "is_active": True},
             )
 
+            reactivated = False
             if not created:
                 changed = False
                 if not subscriber.is_active:
                     subscriber.is_active = True
                     changed = True
+                    reactivated = True
                 if subscriber.source != source:
                     subscriber.source = source
                     changed = True
@@ -55,29 +59,32 @@ class SubscribeAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        subject = getattr(settings, "NEWSLETTER_WELCOME_SUBJECT", "Welcome to TRESSE")
-        from_email = (getattr(settings, "DEFAULT_FROM_EMAIL", "") or "no-reply@tresse.com").strip()
-        reply_to = [(getattr(settings, "SUPPORT_EMAIL", "") or from_email).strip()]
-
-        ctx = {"email": email, "source": source, "brand": "TRESSE"}
-
         email_sent = False
-        try:
-            text_body = render_to_string("emails/accounts/newsletter_welcome.txt", ctx).strip()
-            html_body = render_to_string("emails/accounts/newsletter_welcome.html", ctx)
+        if created or reactivated:
+            subject = getattr(settings, "NEWSLETTER_WELCOME_SUBJECT", "Welcome to TRESSE")
+            from_email = (
+                getattr(settings, "DEFAULT_FROM_EMAIL", "") or "no-reply@tresse.com"
+            ).strip()
+            reply_to = [(getattr(settings, "SUPPORT_EMAIL", "") or from_email).strip()]
 
-            msg = EmailMultiAlternatives(
-                subject=subject,
-                body=text_body,
-                from_email=from_email,
-                to=[email],
-                reply_to=reply_to,
-            )
-            msg.attach_alternative(html_body, "text/html")
-            msg.send(fail_silently=False)
-            email_sent = True
-        except Exception as e:
-            logger.exception("Newsletter email send failed for %s: %s", email, str(e))
+            ctx = {"email": email, "source": source, "brand": "TRESSE"}
+
+            try:
+                text_body = render_to_string("emails/accounts/newsletter_welcome.txt", ctx).strip()
+                html_body = render_to_string("emails/accounts/newsletter_welcome.html", ctx)
+
+                msg = EmailMultiAlternatives(
+                    subject=subject,
+                    body=text_body,
+                    from_email=from_email,
+                    to=[email],
+                    reply_to=reply_to,
+                )
+                msg.attach_alternative(html_body, "text/html")
+                msg.send(fail_silently=False)
+                email_sent = True
+            except Exception as e:
+                logger.exception("Newsletter email send failed for %s: %s", email, str(e))
 
         return Response(
             {"ok": True, "created": created, "email": email, "email_sent": email_sent},

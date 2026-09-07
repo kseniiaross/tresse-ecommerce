@@ -236,6 +236,8 @@ REST_FRAMEWORK = {
         # Back-in-stock subscription spam
         "stock_subscribe_anon": config("THROTTLE_STOCK_SUBSCRIBE_ANON", default="5/min"),
         "stock_subscribe_user": config("THROTTLE_STOCK_SUBSCRIBE_USER", default="20/min"),
+        # Newsletter subscribe spam
+        "newsletter_anon": config("THROTTLE_NEWSLETTER_ANON", default="5/min"),
     },
 }
 

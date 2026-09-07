@@ -95,6 +95,32 @@ class SubscribeAPITestCase(TestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertFalse(resp.data["created"])
+        self.assertFalse(resp.data["email_sent"])
+        mock_render.assert_not_called()
+        mock_email_cls.assert_not_called()
+
+    @patch("newsletter.views.EmailMultiAlternatives")
+    @patch("newsletter.views.render_to_string", return_value="mocked content")
+    def test_second_post_for_active_subscriber_does_not_send_email(
+        self, mock_render, mock_email_cls
+    ):
+        mock_msg = MagicMock()
+        mock_email_cls.return_value = mock_msg
+
+        first = self.client.post(self.url, {"email": "twice@example.com", "source": "footer"})
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(first.data["email_sent"])
+        mock_msg.send.assert_called_once()
+
+        mock_email_cls.reset_mock()
+        mock_render.reset_mock()
+
+        second = self.client.post(self.url, {"email": "twice@example.com", "source": "footer"})
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(second.data["created"])
+        self.assertFalse(second.data["email_sent"])
+        mock_render.assert_not_called()
+        mock_email_cls.assert_not_called()
 
     def test_invalid_email_rejected(self):
         resp = self.client.post(self.url, {"email": "not-an-email"})
