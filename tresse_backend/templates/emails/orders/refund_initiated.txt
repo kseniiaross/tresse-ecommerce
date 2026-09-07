@@ -4,7 +4,7 @@ Hi {{ order.full_name|default:"there" }},
 
 A refund has been initiated for your order.
 
-Order number: #{{ order.id }}
+Order number: {% if order.public_id %}{{ order.public_id }}{% else %}#{{ order.id }}{% endif %}
 Order date: {{ order.created_at }}
 
 Refunds typically take a few business days to appear, depending on your bank.

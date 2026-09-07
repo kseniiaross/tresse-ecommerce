@@ -4,7 +4,7 @@ Hi {{ order.full_name|default:"there" }},
 
 Thank you for your order — we’ve received your payment and we’re preparing your items.
 
-Your TRESSE order #{{ order.id }} is confirmed.
+Your TRESSE order {% if order.public_id %}{{ order.public_id }}{% else %}#{{ order.id }}{% endif %} is confirmed.
 Order date: {{ order.created_at|date:"M d, Y" }} at {{ order.created_at|date:"H:i" }} UTC
 
 Shipping to

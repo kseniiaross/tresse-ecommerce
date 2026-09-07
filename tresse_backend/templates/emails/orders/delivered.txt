@@ -4,7 +4,7 @@ Hi {{ order.full_name|default:"there" }},
 
 Your order has been delivered.
 
-Order number: #{{ order.id }}
+Order number: {% if order.public_id %}{{ order.public_id }}{% else %}#{{ order.id }}{% endif %}
 
 Need help?
 Reply to this email or contact us at {{ support_email }}.

@@ -4,7 +4,7 @@ Hi {{ order.full_name|default:"there" }},
 
 Good news — your order is on the way.
 
-Order number: #{{ order.id }}
+Order number: {% if order.public_id %}{{ order.public_id }}{% else %}#{{ order.id }}{% endif %}
 
 {% if tracking_number %}
 Tracking number: {{ tracking_number }}
