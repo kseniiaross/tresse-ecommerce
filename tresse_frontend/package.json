@@ -13,7 +13,7 @@
 		"lint": "biome check .",
 		"prepare": "husky"
 	},
-		"lint-staged": {
+	"lint-staged": {
 		"**/*.{js,jsx,ts,tsx,css,json}": [
 			"tresse_frontend/node_modules/.bin/biome check --write --no-errors-on-unmatched"
 		]
