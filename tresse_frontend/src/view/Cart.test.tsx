@@ -1,4 +1,4 @@
-import { configureStore } from "@reduxjs/toolkit";
+import { combineReducers, configureStore } from "@reduxjs/toolkit";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
@@ -48,6 +48,17 @@ const mockedApi = api as unknown as {
 	put: ReturnType<typeof vi.fn>;
 	delete: ReturnType<typeof vi.fn>;
 };
+
+// Reducers are combined up front so configureStore receives a single Reducer
+// rather than a ReducersMapObject. Passing the map inline together with an
+// untyped preloadedState makes TS resolve the reducer option to Reducer<S>
+// only, which triggers TS2353 on the first key of the object literal.
+const rootReducer = combineReducers({
+	auth: authReducer,
+	serverCart: serverCartReducer,
+	wishlist: wishlistReducer,
+	cart: clientCartReducer,
+});
 
 function makeGuestItem(overrides: Partial<any> = {}) {
 	return {
@@ -103,12 +114,7 @@ function makeServerItem(overrides: Partial<any> = {}) {
 
 function renderCart(preloadedState: any, initialPath = "/cart") {
 	const store = configureStore({
-		reducer: {
-			auth: authReducer,
-			serverCart: serverCartReducer,
-			wishlist: wishlistReducer,
-			cart: clientCartReducer,
-		},
+		reducer: rootReducer,
 		preloadedState: preloadedState as any,
 	});
 
