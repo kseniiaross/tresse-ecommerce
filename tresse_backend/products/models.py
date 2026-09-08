@@ -215,6 +215,21 @@ class ProductSize(models.Model):
     def __str__(self) -> str:
         return f"{self.product.name} - {self.size.name}"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Tracks the quantity this instance started life with, so signal
+        # handlers can tell a genuine zero-to-positive restock apart from
+        # any other save (a decrement on purchase, an admin edit, etc).
+        # Overwritten with the real DB value by from_db() when the
+        # instance is loaded from the database instead of constructed.
+        self.__original_quantity = self.quantity
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        instance.__original_quantity = dict(zip(field_names, values, strict=True)).get("quantity")
+        return instance
+
 
 class ProductImage(models.Model):
     product = models.ForeignKey(

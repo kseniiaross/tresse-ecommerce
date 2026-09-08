@@ -407,8 +407,9 @@ class StockSignalTestCase(TestCase):
 
     def test_restock_sends_email_and_marks_notified(self):
         with patch("products.signals.send_back_in_stock_email") as mock_send:
-            self.product_size.quantity = 5
-            self.product_size.save()
+            with self.captureOnCommitCallbacks(execute=True):
+                self.product_size.quantity = 5
+                self.product_size.save()
 
             mock_send.assert_called_once()
             sub = StockSubscription.objects.get(product=self.product, email="waiting@example.com")
@@ -416,8 +417,9 @@ class StockSignalTestCase(TestCase):
 
     def test_zero_quantity_does_not_trigger_notification(self):
         with patch("products.signals.send_back_in_stock_email") as mock_send:
-            self.product_size.quantity = 0
-            self.product_size.save()
+            with self.captureOnCommitCallbacks(execute=True):
+                self.product_size.quantity = 0
+                self.product_size.save()
             mock_send.assert_not_called()
 
     def test_already_notified_subscription_not_notified_again(self):
@@ -426,6 +428,45 @@ class StockSignalTestCase(TestCase):
         sub.save()
 
         with patch("products.signals.send_back_in_stock_email") as mock_send:
-            self.product_size.quantity = 5
-            self.product_size.save()
+            with self.captureOnCommitCallbacks(execute=True):
+                self.product_size.quantity = 5
+                self.product_size.save()
+            mock_send.assert_not_called()
+
+    def test_decrease_does_not_trigger_notification(self):
+        """5 -> 4 (e.g. a purchase decrementing stock) must send nothing."""
+        size, _ = Size.objects.get_or_create(name="M")
+        product_size = ProductSize.objects.create(
+            product=self.product,
+            size=size,
+            quantity=5,
+        )
+
+        with patch("products.signals.send_back_in_stock_email") as mock_send:
+            with self.captureOnCommitCallbacks(execute=True):
+                product_size.quantity = 4
+                product_size.save()
+            mock_send.assert_not_called()
+
+    def test_zero_to_positive_triggers_notification(self):
+        """0 -> 3 is a genuine restock and must send."""
+        with patch("products.signals.send_back_in_stock_email") as mock_send:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.product_size.quantity = 3
+                self.product_size.save()
+            mock_send.assert_called_once()
+
+    def test_positive_to_positive_does_not_trigger_notification(self):
+        """3 -> 5 never crossed zero and must send nothing."""
+        size, _ = Size.objects.get_or_create(name="L")
+        product_size = ProductSize.objects.create(
+            product=self.product,
+            size=size,
+            quantity=3,
+        )
+
+        with patch("products.signals.send_back_in_stock_email") as mock_send:
+            with self.captureOnCommitCallbacks(execute=True):
+                product_size.quantity = 5
+                product_size.save()
             mock_send.assert_not_called()
