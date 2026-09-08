@@ -74,9 +74,9 @@ export default function Footer() {
 						alt=""
 						aria-hidden="true"
 					/>
-					<div className="footer__top-title">WORLDWIDE DELIVERY</div>
+					<div className="footer__top-title">FREE USA DELIVERY</div>
 					<div className="footer__top-text">
-						Receive your order anywhere in the world.
+						Free standard shipping on every US order.
 					</div>
 				</div>
 

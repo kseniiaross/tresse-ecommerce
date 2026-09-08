@@ -12,21 +12,21 @@ export default function ShippingPolicy() {
 
 				<section
 					className="policy__section"
-					aria-labelledby="shippingWorldwide"
+					aria-labelledby="shippingDestinations"
 				>
-					<h2 id="shippingWorldwide" className="policy__h2">
-						Worldwide Shipping
+					<h2 id="shippingDestinations" className="policy__h2">
+						Where We Ship
 					</h2>
 
 					<p className="policy__text">
-						TRESSE offers worldwide shipping to destinations supported by our
-						available shipping carriers and checkout services.
+						TRESSE currently ships within the United States only. Standard
+						shipping is free on all United States orders — no minimum.
 					</p>
 
 					<p className="policy__text">
-						Shipping is not free unless expressly stated otherwise and is
-						calculated based on destination, package details, and available
-						shipping method.
+						Canada and Europe are coming soon. If you would like to be notified
+						when we begin shipping to your country, please join our newsletter
+						or contact us directly.
 					</p>
 				</section>
 
@@ -62,8 +62,8 @@ export default function ShippingPolicy() {
 					<p className="policy__text">
 						Delivery estimates begin after an order has completed production and
 						has been dispatched. Carrier delivery estimates are not guaranteed
-						and may be affected by customs, weather, transportation disruptions,
-						peak periods, or other circumstances outside our reasonable control.
+						and may be affected by weather, transportation disruptions, peak
+						periods, or other circumstances outside our reasonable control.
 					</p>
 				</section>
 
@@ -75,22 +75,6 @@ export default function ShippingPolicy() {
 					<p className="policy__text">
 						When your order is dispatched, tracking information will be sent by
 						email when tracking is available for the selected shipping service.
-					</p>
-				</section>
-
-				<section className="policy__section" aria-labelledby="shippingCustoms">
-					<h2 id="shippingCustoms" className="policy__h2">
-						Customs &amp; Import Fees
-					</h2>
-
-					<p className="policy__text">
-						International orders may be subject to customs duties, import taxes,
-						brokerage charges, or other fees imposed by the destination country.
-					</p>
-
-					<p className="policy__text">
-						Unless otherwise required by applicable law or expressly stated at
-						checkout, these charges are the responsibility of the customer.
 					</p>
 				</section>
 
@@ -120,10 +104,10 @@ export default function ShippingPolicy() {
 					</h2>
 
 					<p className="policy__text">
-						Additional shipping, return, customs, or carrier charges resulting
-						from a refused or unclaimed delivery may be deducted from any refund
-						where permitted by applicable law, unless the refusal resulted from
-						an error by TRESSE.
+						Additional shipping, return, or carrier charges resulting from a
+						refused or unclaimed delivery may be deducted from any refund where
+						permitted by applicable law, unless the refusal resulted from an
+						error by TRESSE.
 					</p>
 				</section>
 
@@ -137,6 +121,29 @@ export default function ShippingPolicy() {
 						promptly with your order details. We will review the matter and,
 						where appropriate, work with the shipping carrier to investigate and
 						provide a reasonable solution.
+					</p>
+				</section>
+
+				<section
+					className="policy__section"
+					aria-labelledby="shippingInternational"
+				>
+					<h2 id="shippingInternational" className="policy__h2">
+						Future International Orders
+					</h2>
+
+					<p className="policy__text">
+						We are not currently accepting orders for delivery outside the
+						United States. When international shipping becomes available, orders
+						may be subject to customs duties, import taxes, brokerage charges,
+						or other fees imposed by the destination country.
+					</p>
+
+					<p className="policy__text">
+						Unless otherwise required by applicable law or expressly stated at
+						checkout, any such charges will be the responsibility of the
+						customer. Applicable terms will be shown at checkout before an order
+						is placed.
 					</p>
 				</section>
 

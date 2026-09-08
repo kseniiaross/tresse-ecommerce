@@ -56,24 +56,31 @@ export default function FAQ() {
 				category: "Shipping",
 				question: "Where do you ship?",
 				answer:
-					"We ship worldwide. Delivery options and final shipping costs are displayed at checkout based on your location.",
+					"We currently ship within the United States only, with free standard shipping on every US order — no minimum. Canada and Europe are coming soon; join our newsletter and we’ll let you know as soon as they open.",
 			},
 			{
 				id: "ship-2",
 				category: "Shipping",
-				question: "How long does delivery take?",
+				question: "How much does shipping cost?",
 				answer:
-					"Delivery time depends on your country and shipping method. After dispatch, standard delivery typically takes 3–10 business days, and express delivery is usually faster.",
+					"Standard shipping is free on all United States orders. There is no minimum order value and no code to enter — it is applied automatically at checkout.",
 			},
 			{
 				id: "ship-3",
 				category: "Shipping",
-				question: "Will I pay duties or customs fees?",
+				question: "How long does delivery take?",
 				answer:
-					"For international orders, local duties and taxes may apply. These fees are set by your country and are not controlled by us.",
+					"Most pieces are made to order, so production usually takes 1–2 weeks. After your order is dispatched, standard delivery within the United States typically takes 3–7 business days.",
 			},
 			{
 				id: "ship-4",
+				category: "Shipping",
+				question: "Do you ship to Canada or Europe?",
+				answer:
+					"Not yet — both are coming soon. We are setting up international shipping properly so there are no surprise customs charges for you at delivery. Join our newsletter to be notified when we open your country.",
+			},
+			{
+				id: "ship-5",
 				category: "Shipping",
 				question: "My package says delivered, but I don’t have it. What now?",
 				answer:
@@ -86,7 +93,7 @@ export default function FAQ() {
 				category: "Returns",
 				question: "What is your return policy?",
 				answer:
-					"You can request a return within 14 days of delivery for unworn items in original condition. Some limited pieces may be final sale if stated on the product page.",
+					"You can request a return within 14 days of delivery for unworn items in original condition with tags attached. Please note that custom-sized pieces, custom-length pieces and swimwear are final sale and cannot be returned — this is stated on the product page and confirmed at checkout.",
 			},
 			{
 				id: "ret-2",
@@ -171,6 +178,13 @@ export default function FAQ() {
 				answer:
 					"Yes. Payment is processed securely via a trusted payment provider. We do not store your full card details on our servers.",
 			},
+			{
+				id: "pay-3",
+				category: "Payments",
+				question: "Will I be charged sales tax?",
+				answer:
+					"Sales tax is calculated automatically at checkout based on your shipping address, and is shown before you confirm your order.",
+			},
 		],
 		[],
 	);
@@ -189,10 +203,6 @@ export default function FAQ() {
 
 	const [activeCategory, setActiveCategory] =
 		useState<FAQItem["category"]>("Shipping");
-
-	const _initialOpenId = useMemo(() => {
-		return items.find((i) => i.category === activeCategory)?.id ?? null;
-	}, [items, activeCategory]);
 
 	const [openId, setOpenId] = useState<string | null>(
 		items.find((i) => i.category === "Shipping")?.id ?? null,
