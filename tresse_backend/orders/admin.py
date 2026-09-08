@@ -247,11 +247,7 @@ class OrderAdmin(admin.ModelAdmin):
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=selected_order.pk)
 
-                if (
-                    order.status != "paid"
-                    or not order.tracking_number
-                    or order.shipped_at
-                ):
+                if order.status != "paid" or not order.tracking_number or order.shipped_at:
                     skipped += 1
                     continue
 
@@ -401,9 +397,7 @@ class OrderAdmin(admin.ModelAdmin):
                     skipped += 1
                     continue
 
-                has_custom_size = order.items.filter(
-                    size__iexact=("CUSTOM SIZE")
-                ).exists()
+                has_custom_size = order.items.filter(size__iexact=("CUSTOM SIZE")).exists()
 
                 if has_custom_size:
                     skipped += 1
@@ -431,9 +425,7 @@ class OrderAdmin(admin.ModelAdmin):
         if skipped:
             self.message_user(
                 request,
-                (
-                    f"{skipped} order(s) skipped. Only eligible requested returns can be approved."
-                ),
+                (f"{skipped} order(s) skipped. Only eligible requested returns can be approved."),
                 level=messages.WARNING,
             )
 
@@ -476,9 +468,7 @@ class OrderAdmin(admin.ModelAdmin):
         if skipped:
             self.message_user(
                 request,
-                (
-                    f"{skipped} order(s) skipped. Only approved returns can be marked as received."
-                ),
+                (f"{skipped} order(s) skipped. Only approved returns can be marked as received."),
                 level=messages.WARNING,
             )
 
@@ -509,9 +499,7 @@ class OrderAdmin(admin.ModelAdmin):
                         skipped += 1
                         continue
 
-                    has_custom_size = order.items.filter(
-                        size__iexact=("CUSTOM SIZE")
-                    ).exists()
+                    has_custom_size = order.items.filter(size__iexact=("CUSTOM SIZE")).exists()
 
                     if has_custom_size:
                         skipped += 1
@@ -530,9 +518,7 @@ class OrderAdmin(admin.ModelAdmin):
                         skipped += 1
                         continue
 
-                    idempotency_key = (
-                        f"return_refund_{order.id}_{order.stripe_payment_intent}"
-                    )
+                    idempotency_key = f"return_refund_{order.id}_{order.stripe_payment_intent}"
 
                     refund = stripe.Refund.create(
                         payment_intent=(order.stripe_payment_intent),

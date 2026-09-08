@@ -202,9 +202,7 @@ class StripeWebhookBaseTestCase(TestCase):
         self.url = reverse("stripe-webhook")
 
     def _post_event(self, event):
-        with patch(
-            "orders.views_stripe.stripe.Webhook.construct_event", return_value=event
-        ):
+        with patch("orders.views_stripe.stripe.Webhook.construct_event", return_value=event):
             return self.client.post(
                 self.url,
                 data=b"{}",
@@ -250,9 +248,7 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         return_value=("visa", "4242"),
     )
     @patch("orders.views_stripe.send_order_confirmation_email")
-    def test_successful_checkout_creates_order_and_decrements_stock(
-        self, mock_email, mock_card
-    ):
+    def test_successful_checkout_creates_order_and_decrements_stock(self, mock_email, mock_card):
         from orders.views_stripe import _build_cart_signature
 
         sig = _build_cart_signature([self.cart_item])
@@ -287,9 +283,7 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         self._post_event(event)
         self._post_event(event)
 
-        self.assertEqual(
-            Order.objects.filter(stripe_payment_intent="pi_test_123").count(), 1
-        )
+        self.assertEqual(Order.objects.filter(stripe_payment_intent="pi_test_123").count(), 1)
 
     def test_cart_signature_mismatch_does_not_create_order(self):
         session = self._build_session(cart_sig="tampered_signature")
@@ -298,9 +292,7 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         resp = self._post_event(event)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertFalse(
-            Order.objects.filter(stripe_payment_intent="pi_test_123").exists()
-        )
+        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
 
     def test_missing_policy_consent_does_not_create_order(self):
         from orders.views_stripe import _build_cart_signature
@@ -320,9 +312,7 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
 
         self._post_event(event)
 
-        self.assertFalse(
-            Order.objects.filter(stripe_payment_intent="pi_test_123").exists()
-        )
+        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
 
     def test_insufficient_stock_does_not_create_order(self):
         from orders.views_stripe import _build_cart_signature
@@ -336,9 +326,7 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         resp = self._post_event(event)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertFalse(
-            Order.objects.filter(stripe_payment_intent="pi_test_123").exists()
-        )
+        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
         self.product_size.refresh_from_db()
         self.assertEqual(self.product_size.quantity, 5)
 
@@ -382,9 +370,7 @@ class RefundWebhookTestCase(TestCase):
         self.url = reverse("stripe-webhook")
 
     def _post_event(self, event):
-        with patch(
-            "orders.views_stripe.stripe.Webhook.construct_event", return_value=event
-        ):
+        with patch("orders.views_stripe.stripe.Webhook.construct_event", return_value=event):
             return self.client.post(
                 self.url,
                 data=b"{}",
