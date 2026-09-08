@@ -42,6 +42,7 @@ vi.mock("react-router-dom", async () => {
 });
 
 import api from "../api/axiosInstance";
+import { getAccessToken } from "../types/token";
 
 const mockedApi = api as unknown as {
 	get: ReturnType<typeof vi.fn>;
@@ -296,5 +297,78 @@ describe("WishList - add to cart modal", () => {
 		await waitFor(() => {
 			expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 		});
+	});
+});
+
+describe("WishList - notify me for out-of-stock items", () => {
+	it("posts to subscribe_back_in_stock when NOTIFY ME is clicked", async () => {
+		vi.mocked(getAccessToken).mockReturnValue("token123");
+		try {
+			mockWishlistEndpoint([
+				makeProduct({ sizes: [{ id: 10, quantity: 0, size: { name: "M" } }] }),
+			]);
+			mockedApi.post.mockResolvedValueOnce({ data: {} });
+			const user = userEvent.setup();
+
+			renderWishList();
+
+			await screen.findByText("Sweater");
+			await user.click(screen.getByRole("button", { name: "ADD TO CART" }));
+
+			const dialog = await screen.findByRole("dialog", {
+				name: "Product options",
+			});
+			await user.click(
+				within(dialog).getByRole("button", { name: "NOTIFY ME" }),
+			);
+
+			await waitFor(() => {
+				expect(mockedApi.post).toHaveBeenCalledWith(
+					"/products/1/subscribe_back_in_stock/",
+				);
+			});
+			expect(
+				await within(dialog).findByRole("button", { name: "SUBSCRIBED" }),
+			).toBeInTheDocument();
+		} finally {
+			vi.mocked(getAccessToken).mockReturnValue(null);
+		}
+	});
+
+	it("does not show SUBSCRIBED when the subscribe request fails", async () => {
+		vi.mocked(getAccessToken).mockReturnValue("token123");
+		try {
+			mockWishlistEndpoint([
+				makeProduct({ sizes: [{ id: 10, quantity: 0, size: { name: "M" } }] }),
+			]);
+			mockedApi.post.mockRejectedValueOnce(new Error("network error"));
+			const user = userEvent.setup();
+
+			renderWishList();
+
+			await screen.findByText("Sweater");
+			await user.click(screen.getByRole("button", { name: "ADD TO CART" }));
+
+			const dialog = await screen.findByRole("dialog", {
+				name: "Product options",
+			});
+			await user.click(
+				within(dialog).getByRole("button", { name: "NOTIFY ME" }),
+			);
+
+			await waitFor(() => {
+				expect(mockedApi.post).toHaveBeenCalledWith(
+					"/products/1/subscribe_back_in_stock/",
+				);
+			});
+			expect(
+				within(dialog).queryByRole("button", { name: "SUBSCRIBED" }),
+			).not.toBeInTheDocument();
+			expect(
+				await within(dialog).findByRole("button", { name: "TRY AGAIN" }),
+			).toBeInTheDocument();
+		} finally {
+			vi.mocked(getAccessToken).mockReturnValue(null);
+		}
 	});
 });

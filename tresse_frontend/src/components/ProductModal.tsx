@@ -3,6 +3,7 @@
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch } from "react-redux";
+import api from "../api/axiosInstance";
 import { useDialogDismiss } from "../hooks/useDialogDismiss";
 import type { AppDispatch } from "../store";
 import * as serverCart from "../store/serverCartSlice";
@@ -23,6 +24,7 @@ const ProductModal: React.FC<ProductModalProps> = ({ product, onClose }) => {
 	const [selectedSizeId, setSelectedSizeId] = useState<number | null>(null);
 	const [notifyLoading, setNotifyLoading] = useState(false);
 	const [notifyDone, setNotifyDone] = useState(false);
+	const [notifyError, setNotifyError] = useState(false);
 	const [addBusy, setAddBusy] = useState(false);
 
 	const overlayRef = useRef<HTMLDivElement>(null);
@@ -65,6 +67,7 @@ const ProductModal: React.FC<ProductModalProps> = ({ product, onClose }) => {
 		// Reset local state when product changes.
 		setSelectedSizeId(null);
 		setNotifyDone(false);
+		setNotifyError(false);
 		setNotifyLoading(false);
 		setAddBusy(false);
 	}, [product]);
@@ -108,14 +111,28 @@ const ProductModal: React.FC<ProductModalProps> = ({ product, onClose }) => {
 	const handleNotifyMe = async () => {
 		if (!product || notifyLoading) return;
 
+		// This modal has no email field: an authenticated user's email is
+		// taken from their account server-side, so no request body is
+		// needed. A guest has no email to send here (unlike ProductCatalog's
+		// notify flow, which collects one), and in practice this modal is
+		// only reachable while authenticated (via the wishlist), so mirror
+		// ProductCatalog's guard and no-op rather than sending an
+		// unidentifiable subscription.
+		if (!isAuthed) return;
+
+		setNotifyError(false);
+
 		try {
 			setNotifyLoading(true);
 
-			// UI-only stub: keeps existing behavior (no API call yet).
+			await api.post(`/products/${product.id}/subscribe_back_in_stock/`);
+
 			setNotifyDone(true);
 			window.setTimeout(() => setNotifyDone(false), 2500);
 		} catch (e) {
 			console.error("Notify me error:", e);
+			setNotifyError(true);
+			window.setTimeout(() => setNotifyError(false), 2500);
 		} finally {
 			setNotifyLoading(false);
 		}
@@ -184,14 +201,16 @@ const ProductModal: React.FC<ProductModalProps> = ({ product, onClose }) => {
 						<button
 							className="productModal__notify"
 							type="button"
-							onClick={handleNotifyMe}
+							onClick={() => void handleNotifyMe()}
 							disabled={notifyLoading}
 						>
 							{notifyDone
 								? "SUBSCRIBED"
 								: notifyLoading
 									? "SAVING..."
-									: "NOTIFY ME"}
+									: notifyError
+										? "TRY AGAIN"
+										: "NOTIFY ME"}
 						</button>
 					)}
 
