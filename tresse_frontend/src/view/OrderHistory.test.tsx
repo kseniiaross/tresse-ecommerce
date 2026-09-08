@@ -164,6 +164,49 @@ describe("OrderHistory - order display", () => {
 
 		expect(await screen.findByText("Pending")).toBeInTheDocument();
 	});
+
+	it("renders the tracking number and carrier link when present", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [
+				makeOrder({
+					tracking_number: "9400111899223197428490",
+					tracking_carrier: "usps",
+					shipped_at: new Date(FIXED_NOW - 24 * 60 * 60 * 1000).toISOString(),
+				}),
+			],
+		});
+
+		renderOrderHistory();
+
+		const trackingLink = await screen.findByRole("link", {
+			name: "9400111899223197428490",
+		});
+
+		expect(trackingLink).toBeInTheDocument();
+		expect(trackingLink.getAttribute("href")).toContain(
+			"9400111899223197428490",
+		);
+		expect(screen.getByText("Shipped")).toBeInTheDocument();
+	});
+
+	it("does not render tracking number or link when absent", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [
+				makeOrder({
+					tracking_number: "",
+					tracking_carrier: "",
+					shipped_at: "",
+				}),
+			],
+		});
+
+		renderOrderHistory();
+
+		await screen.findByText("TR-20260812-ABC123");
+		expect(screen.queryByText("Tracking")).not.toBeInTheDocument();
+		expect(screen.queryByText("Shipped")).not.toBeInTheDocument();
+		expect(screen.queryByRole("link", { name: /\d/ })).not.toBeInTheDocument();
+	});
 });
 
 describe("OrderHistory - cancel window (24 hours)", () => {

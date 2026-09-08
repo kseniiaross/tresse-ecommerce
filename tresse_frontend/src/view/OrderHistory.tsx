@@ -24,6 +24,9 @@ type Order = {
 	currency: string;
 	card_brand?: string;
 	card_last4?: string;
+	tracking_number?: string;
+	tracking_carrier?: string;
+	shipped_at?: string;
 	items: OrderItem[];
 };
 
@@ -74,6 +77,29 @@ const getStatusClass = (status: OrderStatus) => {
 	}
 
 	return "order-history__badge--pending";
+};
+
+const USPS_TRACKING_URL =
+	"https://tools.usps.com/go/TrackConfirmAction?tLabels=";
+
+const getCarrierLabel = (carrier: string) => {
+	if (carrier.trim().toLowerCase() === "usps") {
+		return "USPS";
+	}
+
+	return titleCase(carrier);
+};
+
+const getTrackingUrl = (carrier: string, trackingNumber: string) => {
+	if (!trackingNumber) {
+		return "";
+	}
+
+	if (carrier.trim().toLowerCase() === "usps") {
+		return `${USPS_TRACKING_URL}${encodeURIComponent(trackingNumber)}`;
+	}
+
+	return "";
 };
 
 const getCreatedAtMs = (order: Order) => {
@@ -328,8 +354,70 @@ export default function OrderHistory() {
 										>
 											{formatDateTime(order.created_at)}
 										</div>
+
+										{order.shipped_at ? (
+											<>
+												<div
+													className="
+                            order-history__label
+                            order-history__label--shipped
+                          "
+												>
+													Shipped
+												</div>
+
+												<div
+													className="
+                            order-history__value
+                            order-history__value--date
+                          "
+												>
+													{formatDateTime(order.shipped_at)}
+												</div>
+											</>
+										) : null}
 									</div>
 								</div>
+
+								{order.tracking_number ? (
+									<div className="order-history__tracking">
+										<div className="order-history__label">Tracking</div>
+
+										<div
+											className="
+                        order-history__value
+                        order-history__value--tracking
+                      "
+										>
+											{order.tracking_carrier ? (
+												<span className="order-history__tracking-carrier">
+													{getCarrierLabel(order.tracking_carrier)}
+												</span>
+											) : null}
+
+											{getTrackingUrl(
+												order.tracking_carrier || "",
+												order.tracking_number,
+											) ? (
+												<a
+													className="order-history__tracking-link"
+													href={getTrackingUrl(
+														order.tracking_carrier || "",
+														order.tracking_number,
+													)}
+													target="_blank"
+													rel="noreferrer"
+												>
+													{order.tracking_number}
+												</a>
+											) : (
+												<span className="order-history__tracking-number">
+													{order.tracking_number}
+												</span>
+											)}
+										</div>
+									</div>
+								) : null}
 
 								<div className="order-history__pay-row">
 									<div className="order-history__pay-text">

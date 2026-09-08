@@ -110,6 +110,47 @@
 	white-space: nowrap;
 }
 
+.order-history__label--shipped {
+	margin-top: 10px;
+}
+
+/* =========================================================================
+   TRACKING
+   ========================================================================= */
+
+.order-history__tracking {
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid var(--border-soft);
+}
+
+.order-history__value--tracking {
+	display: inline-flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 8px;
+	overflow: visible;
+	white-space: normal;
+}
+
+.order-history__tracking-carrier {
+	font-weight: 700;
+}
+
+.order-history__tracking-link {
+	color: var(--text);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.order-history__tracking-link:hover {
+	opacity: 0.75;
+}
+
+.order-history__tracking-number {
+	font-weight: 500;
+}
+
 /* =========================================================================
    BADGE
    ========================================================================= */
