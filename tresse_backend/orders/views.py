@@ -312,11 +312,7 @@ def create_checkout_session(request):
             }
         )
 
-    frontend_url = getattr(
-        settings,
-        "FRONTEND_URL",
-        "https://www.tresseknitting.com",
-    )
+    frontend_url = settings.FRONTEND_URL
 
     cart_sig = _build_cart_signature(items)
     has_paid_order = _user_has_paid_order(request.user)
