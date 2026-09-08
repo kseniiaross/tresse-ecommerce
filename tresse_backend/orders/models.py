@@ -179,8 +179,25 @@ class Order(models.Model):
     )
 
     # -------------------------------------------------------------------------
-    # DELIVERY
+    # SHIPPING / DELIVERY
     # -------------------------------------------------------------------------
+
+    tracking_number = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+    )
+
+    tracking_carrier = models.CharField(
+        max_length=50,
+        blank=True,
+        default="USPS",
+    )
+
+    shipped_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
 
     delivered_at = models.DateTimeField(
         blank=True,

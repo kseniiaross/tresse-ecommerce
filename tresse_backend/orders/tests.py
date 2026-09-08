@@ -2,12 +2,16 @@
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
+from django.contrib.messages.storage.fallback import FallbackStorage
 from django.db import IntegrityError
 from django.template.loader import render_to_string
-from django.test import Client, TestCase
+from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
+from django.utils import timezone
 
+from orders.admin import OrderAdmin
 from orders.models import Order
 from products.models import Cart, CartItem, Product, ProductSize, Size
 
@@ -198,7 +202,9 @@ class StripeWebhookBaseTestCase(TestCase):
         self.url = reverse("stripe-webhook")
 
     def _post_event(self, event):
-        with patch("orders.views_stripe.stripe.Webhook.construct_event", return_value=event):
+        with patch(
+            "orders.views_stripe.stripe.Webhook.construct_event", return_value=event
+        ):
             return self.client.post(
                 self.url,
                 data=b"{}",
@@ -244,7 +250,9 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         return_value=("visa", "4242"),
     )
     @patch("orders.views_stripe.send_order_confirmation_email")
-    def test_successful_checkout_creates_order_and_decrements_stock(self, mock_email, mock_card):
+    def test_successful_checkout_creates_order_and_decrements_stock(
+        self, mock_email, mock_card
+    ):
         from orders.views_stripe import _build_cart_signature
 
         sig = _build_cart_signature([self.cart_item])
@@ -264,7 +272,10 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
 
         self.assertFalse(CartItem.objects.filter(cart=self.cart).exists())
 
-    @patch("orders.views_stripe._extract_card_details_from_payment_intent", return_value=("", ""))
+    @patch(
+        "orders.views_stripe._extract_card_details_from_payment_intent",
+        return_value=("", ""),
+    )
     @patch("orders.views_stripe.send_order_confirmation_email")
     def test_duplicate_webhook_is_idempotent(self, mock_email, mock_card):
         from orders.views_stripe import _build_cart_signature
@@ -276,7 +287,9 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         self._post_event(event)
         self._post_event(event)
 
-        self.assertEqual(Order.objects.filter(stripe_payment_intent="pi_test_123").count(), 1)
+        self.assertEqual(
+            Order.objects.filter(stripe_payment_intent="pi_test_123").count(), 1
+        )
 
     def test_cart_signature_mismatch_does_not_create_order(self):
         session = self._build_session(cart_sig="tampered_signature")
@@ -285,7 +298,9 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         resp = self._post_event(event)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
+        self.assertFalse(
+            Order.objects.filter(stripe_payment_intent="pi_test_123").exists()
+        )
 
     def test_missing_policy_consent_does_not_create_order(self):
         from orders.views_stripe import _build_cart_signature
@@ -305,7 +320,9 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
 
         self._post_event(event)
 
-        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
+        self.assertFalse(
+            Order.objects.filter(stripe_payment_intent="pi_test_123").exists()
+        )
 
     def test_insufficient_stock_does_not_create_order(self):
         from orders.views_stripe import _build_cart_signature
@@ -319,7 +336,9 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         resp = self._post_event(event)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
+        self.assertFalse(
+            Order.objects.filter(stripe_payment_intent="pi_test_123").exists()
+        )
         self.product_size.refresh_from_db()
         self.assertEqual(self.product_size.quantity, 5)
 
@@ -363,7 +382,9 @@ class RefundWebhookTestCase(TestCase):
         self.url = reverse("stripe-webhook")
 
     def _post_event(self, event):
-        with patch("orders.views_stripe.stripe.Webhook.construct_event", return_value=event):
+        with patch(
+            "orders.views_stripe.stripe.Webhook.construct_event", return_value=event
+        ):
             return self.client.post(
                 self.url,
                 data=b"{}",
@@ -474,3 +495,92 @@ class OrderEmailTemplatesRenderTestCase(TestCase):
             },
         )
         self.assertIn("Delivered", html)
+
+
+# ============================================================
+# Admin shipping actions
+# ============================================================
+class OrderAdminShippingActionsTestCase(TestCase):
+    def setUp(self):
+        self.user = _make_user("shipping@example.com")
+        self.admin = OrderAdmin(Order, AdminSite())
+        self.factory = RequestFactory()
+
+    def _request(self):
+        request = self.factory.post("/admin/orders/order/")
+        request.session = {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def _make_order(self, **kwargs):
+        defaults = dict(
+            user=self.user,
+            full_name="Anna Smith",
+            address="123 Main St",
+            city="Kyiv",
+            postal_code="01001",
+            country="UA",
+            status="paid",
+        )
+        defaults.update(kwargs)
+        return Order.objects.create(**defaults)
+
+    @patch("orders.admin.send_shipping_confirmation_email")
+    def test_mark_shipped_sends_email_and_sets_timestamp(self, mock_send):
+        order = self._make_order(tracking_number="1Z999AA1")
+
+        self.admin.mark_shipped(
+            self._request(),
+            Order.objects.filter(pk=order.pk),
+        )
+
+        order.refresh_from_db()
+        self.assertIsNotNone(order.shipped_at)
+        mock_send.assert_called_once()
+        _, call_kwargs = mock_send.call_args
+        self.assertEqual(call_kwargs["order"], order)
+        self.assertEqual(call_kwargs["tracking_number"], "1Z999AA1")
+        self.assertIn("1Z999AA1", call_kwargs["tracking_url"])
+
+    @patch("orders.admin.send_shipping_confirmation_email")
+    def test_mark_shipped_skips_ineligible_order(self, mock_send):
+        # No tracking number set, so this order does not qualify.
+        order = self._make_order(tracking_number="")
+
+        self.admin.mark_shipped(
+            self._request(),
+            Order.objects.filter(pk=order.pk),
+        )
+
+        order.refresh_from_db()
+        self.assertIsNone(order.shipped_at)
+        mock_send.assert_not_called()
+
+    @patch("orders.admin.send_delivered_email")
+    def test_mark_delivered_sends_email_and_sets_timestamp(self, mock_send):
+        order = self._make_order(
+            tracking_number="1Z999AA1",
+            shipped_at=timezone.now(),
+        )
+
+        self.admin.mark_delivered(
+            self._request(),
+            Order.objects.filter(pk=order.pk),
+        )
+
+        order.refresh_from_db()
+        self.assertIsNotNone(order.delivered_at)
+        mock_send.assert_called_once_with(order=order)
+
+    @patch("orders.admin.send_delivered_email")
+    def test_mark_delivered_skips_order_not_yet_shipped(self, mock_send):
+        order = self._make_order(shipped_at=None)
+
+        self.admin.mark_delivered(
+            self._request(),
+            Order.objects.filter(pk=order.pk),
+        )
+
+        order.refresh_from_db()
+        self.assertIsNone(order.delivered_at)
+        mock_send.assert_not_called()

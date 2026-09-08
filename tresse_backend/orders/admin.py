@@ -8,11 +8,28 @@ from django.contrib import admin, messages
 from django.db import transaction
 from django.utils import timezone
 
+from .emails import send_delivered_email, send_shipping_confirmation_email
 from .models import Order, OrderItem
 
 logger = logging.getLogger(__name__)
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
+
+TRACKING_URL_TEMPLATES = {
+    "USPS": "https://tools.usps.com/go/TrackConfirmAction?tLabels={tracking_number}",
+    "UPS": "https://www.ups.com/track?tracknum={tracking_number}",
+    "FEDEX": "https://www.fedex.com/fedextrack/?trknbr={tracking_number}",
+    "DHL": "https://www.dhl.com/us-en/home/tracking.html?tracking-id={tracking_number}",
+}
+
+
+def _build_tracking_url(carrier: str, tracking_number: str) -> str:
+    template = TRACKING_URL_TEMPLATES.get((carrier or "").strip().upper())
+
+    if not template or not tracking_number:
+        return ""
+
+    return template.format(tracking_number=tracking_number)
 
 
 class OrderItemInline(admin.TabularInline):
@@ -42,6 +59,8 @@ class OrderItemInline(admin.TabularInline):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     actions = (
+        "mark_shipped",
+        "mark_delivered",
         "approve_return",
         "mark_return_received",
         "issue_stripe_refund",
@@ -65,6 +84,7 @@ class OrderAdmin(admin.ModelAdmin):
         "card_last4",
         "policy_accepted",
         "custom_size_final_sale_acknowledged",
+        "shipped_at",
         "delivered_at",
         "created_at",
     )
@@ -115,6 +135,7 @@ class OrderAdmin(admin.ModelAdmin):
         "policy_version",
         "policy_accepted_at",
         "custom_size_final_sale_acknowledged",
+        "shipped_at",
         "created_at",
     )
 
@@ -140,6 +161,9 @@ class OrderAdmin(admin.ModelAdmin):
                     "state",
                     "postal_code",
                     "country",
+                    "tracking_number",
+                    "tracking_carrier",
+                    "shipped_at",
                     "delivered_at",
                 )
             },
@@ -207,6 +231,151 @@ class OrderAdmin(admin.ModelAdmin):
 
     inlines = (OrderItemInline,)
 
+    @admin.action(description=("Mark selected orders as shipped"))
+    def mark_shipped(
+        self,
+        request,
+        queryset,
+    ):
+        shipped = 0
+        skipped = 0
+        failed = 0
+
+        to_notify = []
+
+        for selected_order in queryset:
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(pk=selected_order.pk)
+
+                if (
+                    order.status != "paid"
+                    or not order.tracking_number
+                    or order.shipped_at
+                ):
+                    skipped += 1
+                    continue
+
+                order.shipped_at = timezone.now()
+
+                order.save(update_fields=["shipped_at"])
+
+            shipped += 1
+            to_notify.append(order)
+
+        # Send emails outside the DB transaction so an SMTP failure can't
+        # roll back the order updates above.
+        for order in to_notify:
+            try:
+                tracking_url = _build_tracking_url(
+                    order.tracking_carrier,
+                    order.tracking_number,
+                )
+
+                send_shipping_confirmation_email(
+                    order=order,
+                    tracking_number=order.tracking_number,
+                    tracking_url=tracking_url,
+                )
+
+            except Exception:
+                failed += 1
+
+                logger.exception(
+                    "admin_shipping_confirmation_email_failed order_id=%s",
+                    order.id,
+                )
+
+        if shipped:
+            self.message_user(
+                request,
+                (f"{shipped} order(s) marked as shipped."),
+                level=messages.SUCCESS,
+            )
+
+        if skipped:
+            self.message_user(
+                request,
+                (
+                    f"{skipped} order(s) skipped. "
+                    "Only paid orders with a tracking number "
+                    "that have not already shipped can be marked as shipped."
+                ),
+                level=messages.WARNING,
+            )
+
+        if failed:
+            self.message_user(
+                request,
+                (f"{failed} shipping confirmation email(s) failed to send."),
+                level=messages.ERROR,
+            )
+
+    @admin.action(description=("Mark selected orders as delivered"))
+    def mark_delivered(
+        self,
+        request,
+        queryset,
+    ):
+        delivered = 0
+        skipped = 0
+        failed = 0
+
+        to_notify = []
+
+        for selected_order in queryset:
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(pk=selected_order.pk)
+
+                if not order.shipped_at or order.delivered_at:
+                    skipped += 1
+                    continue
+
+                order.delivered_at = timezone.now()
+
+                order.save(update_fields=["delivered_at"])
+
+            delivered += 1
+            to_notify.append(order)
+
+        # Send emails outside the DB transaction so an SMTP failure can't
+        # roll back the order updates above.
+        for order in to_notify:
+            try:
+                send_delivered_email(order=order)
+
+            except Exception:
+                failed += 1
+
+                logger.exception(
+                    "admin_delivered_email_failed order_id=%s",
+                    order.id,
+                )
+
+        if delivered:
+            self.message_user(
+                request,
+                (f"{delivered} order(s) marked as delivered."),
+                level=messages.SUCCESS,
+            )
+
+        if skipped:
+            self.message_user(
+                request,
+                (
+                    f"{skipped} order(s) skipped. "
+                    "Only shipped orders that have not already "
+                    "been delivered can be marked as delivered."
+                ),
+                level=messages.WARNING,
+            )
+
+        if failed:
+            self.message_user(
+                request,
+                (f"{failed} delivery notification email(s) failed to send."),
+                level=messages.ERROR,
+            )
+
     @admin.action(description=("Approve selected return requests"))
     def approve_return(
         self,
@@ -232,7 +401,9 @@ class OrderAdmin(admin.ModelAdmin):
                     skipped += 1
                     continue
 
-                has_custom_size = order.items.filter(size__iexact=("CUSTOM SIZE")).exists()
+                has_custom_size = order.items.filter(
+                    size__iexact=("CUSTOM SIZE")
+                ).exists()
 
                 if has_custom_size:
                     skipped += 1
@@ -260,7 +431,9 @@ class OrderAdmin(admin.ModelAdmin):
         if skipped:
             self.message_user(
                 request,
-                (f"{skipped} order(s) skipped. Only eligible requested returns can be approved."),
+                (
+                    f"{skipped} order(s) skipped. Only eligible requested returns can be approved."
+                ),
                 level=messages.WARNING,
             )
 
@@ -303,7 +476,9 @@ class OrderAdmin(admin.ModelAdmin):
         if skipped:
             self.message_user(
                 request,
-                (f"{skipped} order(s) skipped. Only approved returns can be marked as received."),
+                (
+                    f"{skipped} order(s) skipped. Only approved returns can be marked as received."
+                ),
                 level=messages.WARNING,
             )
 
@@ -334,7 +509,9 @@ class OrderAdmin(admin.ModelAdmin):
                         skipped += 1
                         continue
 
-                    has_custom_size = order.items.filter(size__iexact=("CUSTOM SIZE")).exists()
+                    has_custom_size = order.items.filter(
+                        size__iexact=("CUSTOM SIZE")
+                    ).exists()
 
                     if has_custom_size:
                         skipped += 1
@@ -353,7 +530,9 @@ class OrderAdmin(admin.ModelAdmin):
                         skipped += 1
                         continue
 
-                    idempotency_key = f"return_refund_{order.id}_{order.stripe_payment_intent}"
+                    idempotency_key = (
+                        f"return_refund_{order.id}_{order.stripe_payment_intent}"
+                    )
 
                     refund = stripe.Refund.create(
                         payment_intent=(order.stripe_payment_intent),
