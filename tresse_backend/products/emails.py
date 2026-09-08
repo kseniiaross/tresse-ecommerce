@@ -82,10 +82,11 @@ def send_cart_reminder_email(
     to_email: str,
     first_name: str = "",
     cart_count: int = 0,
-    cart_url: str = "https://www.tresseknitting.com/cart",
+    cart_url: str = "",
 ) -> None:
     name = first_name.strip() or "there"
     subject = "TRESSE — Your pieces are waiting"
+    cart_url = cart_url or f"{settings.FRONTEND_URL.rstrip('/')}/cart"
 
     body = (
         f"Hi {name},\n\n"
@@ -110,10 +111,11 @@ def send_wishlist_reminder_email(
     to_email: str,
     first_name: str = "",
     wishlist_count: int = 0,
-    wishlist_url: str = "https://www.tresseknitting.com/wishlist",
+    wishlist_url: str = "",
 ) -> None:
     name = first_name.strip() or "there"
     subject = "TRESSE — Your wishlist is waiting"
+    wishlist_url = wishlist_url or f"{settings.FRONTEND_URL.rstrip('/')}/wishlist"
 
     body = (
         f"Hi {name},\n\n"

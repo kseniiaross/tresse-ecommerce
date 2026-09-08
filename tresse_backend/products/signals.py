@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.conf import settings
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
@@ -23,7 +24,7 @@ def notify_when_back_in_stock(sender, instance: ProductSize, **kwargs):
     if not subscriptions.exists():
         return
 
-    product_url = f"https://www.tresseknitting.com/product/{product.id}"
+    product_url = f"{settings.FRONTEND_URL.rstrip('/')}/product/{product.id}"
 
     for sub in subscriptions:
         try:
