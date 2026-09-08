@@ -13,9 +13,9 @@
 		"lint": "biome check .",
 		"prepare": "husky"
 	},
-	"lint-staged": {
-		"tresse_frontend/**/*.{js,jsx,ts,tsx,css,json}": [
-			"npx --prefix tresse_frontend biome check --write --no-errors-on-unmatched"
+		"lint-staged": {
+		"**/*.{js,jsx,ts,tsx,css,json}": [
+			"tresse_frontend/node_modules/.bin/biome check --write --no-errors-on-unmatched"
 		]
 	},
 
