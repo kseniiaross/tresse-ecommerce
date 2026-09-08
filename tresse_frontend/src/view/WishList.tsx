@@ -201,6 +201,8 @@ export default function WishList() {
 						product.images?.[0]?.image_url ||
 						fallbackImg;
 
+					const isOut = !product.available || !product.in_stock;
+
 					return (
 						<li key={product.id} className="wishlist__card">
 							<button
@@ -220,6 +222,10 @@ export default function WishList() {
 									className="catalog__wishlist-icon"
 								/>
 							</button>
+
+							{isOut ? (
+								<span className="wishlist__badge">OUT OF STOCK</span>
+							) : null}
 
 							<button
 								type="button"
@@ -248,6 +254,7 @@ export default function WishList() {
 							<button
 								type="button"
 								className="wishlist__addBtn"
+								disabled={isOut}
 								onClick={(e) => {
 									e.stopPropagation();
 									setModalProduct(product);

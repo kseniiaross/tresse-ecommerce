@@ -300,6 +300,31 @@ describe("WishList - add to cart modal", () => {
 	});
 });
 
+describe("WishList - out-of-stock state", () => {
+	it("shows the OUT OF STOCK badge and no enabled ADD TO CART button for an unavailable product", async () => {
+		mockWishlistEndpoint([makeProduct({ available: false, in_stock: true })]);
+
+		renderWishList();
+
+		await screen.findByText("Sweater");
+
+		expect(screen.getByText("OUT OF STOCK")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "ADD TO CART" })).toBeDisabled();
+	});
+
+	it("shows neither the badge nor a disabled button for an in-stock product", async () => {
+		mockWishlistEndpoint([makeProduct({ available: true, in_stock: true })]);
+
+		renderWishList();
+
+		await screen.findByText("Sweater");
+
+		expect(screen.queryByText("OUT OF STOCK")).not.toBeInTheDocument();
+		const addButton = screen.getByRole("button", { name: "ADD TO CART" });
+		expect(addButton).not.toBeDisabled();
+	});
+});
+
 describe("WishList - notify me for out-of-stock items", () => {
 	it("posts to subscribe_back_in_stock when NOTIFY ME is clicked", async () => {
 		vi.mocked(getAccessToken).mockReturnValue("token123");
