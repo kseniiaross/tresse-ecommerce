@@ -1,4 +1,4 @@
-import { configureStore } from "@reduxjs/toolkit";
+import { combineReducers, configureStore } from "@reduxjs/toolkit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import authReducer from "../utils/authSlice";
 import clientCartReducer from "../utils/cartSlice";
@@ -38,14 +38,20 @@ const mockedApi = api as unknown as {
 
 const mockedGetToken = getAccessToken as unknown as ReturnType<typeof vi.fn>;
 
+// Reducers are combined up front so configureStore receives a single Reducer
+// rather than a ReducersMapObject. Passing the map inline together with an
+// untyped preloadedState makes TS resolve the reducer option to Reducer<S>
+// only, which triggers TS2353 on the first key of the object literal.
+const rootReducer = combineReducers({
+	auth: authReducer,
+	serverCart: reducer,
+	wishlist: wishlistReducer,
+	cart: clientCartReducer,
+});
+
 function makeStore(preloadedState?: any) {
 	return configureStore({
-		reducer: {
-			auth: authReducer,
-			serverCart: reducer,
-			wishlist: wishlistReducer,
-			cart: clientCartReducer,
-		},
+		reducer: rootReducer,
 		preloadedState: preloadedState as any,
 	});
 }
@@ -134,23 +140,26 @@ describe("addCartItem thunk", () => {
 		);
 	});
 
-	it("falls back to product_size field on 400 response", async () => {
+	// The backend reads product_size_id only (CartItemAPIView.post) and returns
+	// 400 for genuine problems too — out of stock, unavailable product, quantity
+	// above the remaining stock. A single request must surface that message
+	// as-is rather than being retried under a different field name.
+	it("does not retry on a 400 and surfaces the server error", async () => {
 		const badRequestError = {
-			response: { status: 400, data: {} },
+			response: {
+				status: 400,
+				data: { quantity: ["Only 2 items are available in this size."] },
+			},
 		};
-		mockedApi.post
-			.mockRejectedValueOnce(badRequestError)
-			.mockResolvedValueOnce({ data: { id: 6 } });
+		mockedApi.post.mockRejectedValueOnce(badRequestError);
 
 		const store = makeStore();
-		await store.dispatch(
-			addCartItem({ product_size_id: 10, quantity: 2 } as any),
+		const result = await store.dispatch(
+			addCartItem({ product_size_id: 10, quantity: 3 } as any),
 		);
 
-		expect(mockedApi.post).toHaveBeenCalledTimes(2);
-		const secondCallBody = mockedApi.post.mock.calls[1][1];
-		expect(secondCallBody).toHaveProperty("product_size", 10);
-		expect(secondCallBody).not.toHaveProperty("product_size_id");
+		expect(mockedApi.post).toHaveBeenCalledTimes(1);
+		expect(result.type).toBe("serverCart/addItem/rejected");
 	});
 
 	it("does not retry on non-400 errors", async () => {
@@ -345,7 +354,10 @@ describe("mergeGuestCart thunk", () => {
 		expect(store.getState().cart.items).toHaveLength(2);
 	});
 
-	it("forwards custom length fields when merging", async () => {
+	// custom_length_cm and custom_length_surcharge are read_only on
+	// CartItemSerializer and snapshotted server-side from the product, so the
+	// client only needs to forward the custom_length_selected flag.
+	it("forwards the custom length flag when merging", async () => {
 		mockedGetToken.mockReturnValue("fake-token");
 		mockedApi.post.mockResolvedValue({ data: { id: 1 } });
 

@@ -67,6 +67,14 @@ const hasToken = () => {
 	return typeof t === "string" && t.trim().length > 0;
 };
 
+// CartItemAPIView reads product_size_id only, and CartItemSerializer returns
+// 400 for genuine problems as well — out of stock, unavailable product, a
+// quantity above the remaining stock. The request is therefore sent once and
+// the server error is surfaced as-is.
+//
+// custom_length_cm and custom_length_surcharge are read_only on the serializer
+// and snapshotted server-side from the product, so only the
+// custom_length_selected flag is sent.
 async function postCartItem(payload: AddCartItemPayload) {
 	const qty = clampMin1(payload.quantity ?? 1);
 
@@ -92,33 +100,9 @@ async function postCartItem(payload: AddCartItemPayload) {
 		custom_fit_notes: payload.custom_fit_notes ?? "",
 	};
 
-	try {
-		const { data } = await api.post<CartItemDto>("/products/cart/items/", body);
+	const { data } = await api.post<CartItemDto>("/products/cart/items/", body);
 
-		return data;
-	} catch (err: unknown) {
-		const maybeAxios = err as {
-			response?: {
-				status?: number;
-				data?: unknown;
-			};
-		};
-
-		const status = maybeAxios?.response?.status;
-
-		if (status !== 400) {
-			throw err;
-		}
-
-		const { product_size_id, ...rest } = body;
-
-		const { data } = await api.post<CartItemDto>("/products/cart/items/", {
-			...rest,
-			product_size: product_size_id,
-		});
-
-		return data;
-	}
+	return data;
 }
 
 export const fetchCart = createAsyncThunk<CartDto | null>(
