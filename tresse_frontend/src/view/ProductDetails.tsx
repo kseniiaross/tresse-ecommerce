@@ -477,7 +477,11 @@ export default function ProductDetails() {
 		setUiMessage(null);
 
 		try {
-			await api.post(`/products/${product.id}/toggle_wishlist/`);
+			if (product.is_in_wishlist) {
+				await api.delete(`/products/${product.id}/wishlist/`);
+			} else {
+				await api.post(`/products/${product.id}/wishlist/`);
+			}
 
 			setProduct((previous) => {
 				if (!previous) {

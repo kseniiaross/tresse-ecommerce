@@ -330,7 +330,7 @@ describe("ProductDetails - wishlist", () => {
 		await screen.findByText("Sweater");
 		await user.click(screen.getByRole("button", { name: /add to wishlist/i }));
 
-		expect(mockedApi.post).toHaveBeenCalledWith("/products/1/toggle_wishlist/");
+		expect(mockedApi.post).toHaveBeenCalledWith("/products/1/wishlist/");
 		expect(
 			await screen.findByRole("button", { name: /remove from wishlist/i }),
 		).toBeInTheDocument();
