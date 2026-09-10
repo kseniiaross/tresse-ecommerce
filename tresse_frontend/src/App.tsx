@@ -32,6 +32,7 @@ import Footer from "./view/Footer";
 import Header from "./view/Header";
 import Help from "./view/Help";
 import Home from "./view/Home";
+import NewsletterUnsubscribe from "./view/NewsletterUnsubscribe";
 import Order from "./view/Order";
 import OrderHistory from "./view/OrderHistory";
 import OrderSuccess from "./view/OrderSuccess";
@@ -215,6 +216,11 @@ export default function App() {
 						<Route path="/catalog" element={<ProductCatalog />} />
 						<Route path="/product/:id" element={<ProductDetail />} />
 						<Route path="/cart" element={<Cart />} />
+
+						<Route
+							path="/newsletter/unsubscribe/:token"
+							element={<NewsletterUnsubscribe />}
+						/>
 
 						<Route
 							path="/account/restore/:uidb64/:token"

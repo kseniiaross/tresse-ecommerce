@@ -1,6 +1,6 @@
 import axiosInstance from "../api/axiosInstance";
 
-export type SubscribeSource = "modal" | "footer" | "unknown";
+export type SubscribeSource = "modal" | "footer" | "unsubscribe" | "unknown";
 
 // Persisted timestamps (ms) used to control newsletter modal frequency across sessions.
 const DISMISS_KEY = "tresse:newsletter:lastDismissedAt";
