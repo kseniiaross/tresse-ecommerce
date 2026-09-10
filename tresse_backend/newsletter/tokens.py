@@ -5,6 +5,7 @@ The token encodes the subscriber's email using django.core.signing (not a
 raw id or email) so a third party can't unsubscribe someone else just by
 guessing or enumerating identifiers.
 """
+
 from __future__ import annotations
 
 from django.conf import settings

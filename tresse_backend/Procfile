@@ -1,0 +1,1 @@
+web: python manage.py migrate --noinput && python3 manage.py collectstatic --noinput && gunicorn tresse.wsgi --bind 0.0.0.0:$PORT
