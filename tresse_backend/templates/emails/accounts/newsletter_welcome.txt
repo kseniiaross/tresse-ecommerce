@@ -6,3 +6,5 @@ You’ll be the first to know about new collections, limited releases and exclus
 — TRESSE
 
 If you didn’t subscribe, just ignore this email.
+
+Unsubscribe: {{ unsubscribe_url }}

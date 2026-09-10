@@ -1,6 +1,7 @@
 # tresse_backend/newsletter/tests.py
 from unittest.mock import MagicMock, patch
 
+from django.core import signing
 from django.db import IntegrityError
 from django.template.loader import render_to_string
 from django.test import TestCase
@@ -9,6 +10,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from newsletter.models import NewsletterSubscriber
+from newsletter.tokens import build_unsubscribe_url, make_unsubscribe_token
 
 
 class NewsletterModelTestCase(TestCase):
@@ -149,13 +151,87 @@ class SubscribeAPITestCase(TestCase):
         self.assertTrue(NewsletterSubscriber.objects.filter(email="resilient@example.com").exists())
 
 
+class UnsubscribeAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def _url(self, token):
+        return reverse("newsletter_unsubscribe", args=[token])
+
+    def test_valid_token_deactivates_subscriber(self):
+        sub = NewsletterSubscriber.objects.create(email="active@example.com", is_active=True)
+        token = make_unsubscribe_token(sub.email)
+
+        resp = self.client.post(self._url(token))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        sub.refresh_from_db()
+        self.assertFalse(sub.is_active)
+
+    def test_tampered_token_does_not_deactivate(self):
+        sub = NewsletterSubscriber.objects.create(email="active2@example.com", is_active=True)
+        token = make_unsubscribe_token(sub.email)
+        tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+
+        resp = self.client.post(self._url(tampered))
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", resp.data)
+        sub.refresh_from_db()
+        self.assertTrue(sub.is_active)
+
+    def test_expired_token_returns_400(self):
+        sub = NewsletterSubscriber.objects.create(email="expired@example.com", is_active=True)
+        with patch("newsletter.tokens.UNSUBSCRIBE_TOKEN_MAX_AGE", -1):
+            token = signing.dumps(sub.email, salt="newsletter.unsubscribe")
+            resp = self.client.post(self._url(token))
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        sub.refresh_from_db()
+        self.assertTrue(sub.is_active)
+
+    def test_already_inactive_subscriber_stays_inactive_without_error(self):
+        sub = NewsletterSubscriber.objects.create(email="inactive@example.com", is_active=False)
+        token = make_unsubscribe_token(sub.email)
+
+        resp = self.client.post(self._url(token))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        sub.refresh_from_db()
+        self.assertFalse(sub.is_active)
+
+    def test_unknown_email_token_returns_400(self):
+        token = make_unsubscribe_token("nosuchsubscriber@example.com")
+
+        resp = self.client.post(self._url(token))
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_build_unsubscribe_url_points_to_frontend_route(self):
+        url = build_unsubscribe_url("someone@example.com")
+        token = make_unsubscribe_token("someone@example.com")
+        # Tokens embed a timestamp, so compare structure rather than the
+        # exact token string.
+        self.assertTrue(url.startswith("http"))
+        self.assertIn("/newsletter/unsubscribe/", url)
+        self.assertEqual(
+            signing.loads(url.rsplit("/", 2)[-2], salt="newsletter.unsubscribe"),
+            signing.loads(token, salt="newsletter.unsubscribe"),
+        )
+
+
 class NewsletterWelcomeTemplateRenderTestCase(TestCase):
     """Renders the real templates (no render_to_string mock) with the exact
     context newsletter/views.py builds, to catch missing-variable bugs that
     a mocked render would hide."""
 
     def _context(self):
-        return {"email": "new@example.com", "source": "footer", "brand": "TRESSE"}
+        return {
+            "email": "new@example.com",
+            "source": "footer",
+            "brand": "TRESSE",
+            "unsubscribe_url": build_unsubscribe_url("new@example.com"),
+        }
 
     def test_txt_template_has_no_missing_substitutions(self):
         text_body = render_to_string("emails/accounts/newsletter_welcome.txt", self._context())
@@ -168,3 +244,13 @@ class NewsletterWelcomeTemplateRenderTestCase(TestCase):
         self.assertNotIn("Hi ,", html_body)
         self.assertNotIn("{{", html_body)
         self.assertNotIn("}}", html_body)
+
+    def test_txt_template_contains_unsubscribe_link(self):
+        ctx = self._context()
+        text_body = render_to_string("emails/accounts/newsletter_welcome.txt", ctx)
+        self.assertIn(ctx["unsubscribe_url"], text_body)
+
+    def test_html_template_contains_unsubscribe_link(self):
+        ctx = self._context()
+        html_body = render_to_string("emails/accounts/newsletter_welcome.html", ctx)
+        self.assertIn(ctx["unsubscribe_url"], html_body)

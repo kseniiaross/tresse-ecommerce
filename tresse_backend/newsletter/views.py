@@ -2,6 +2,7 @@
 import logging
 
 from django.conf import settings
+from django.core import signing
 from django.core.mail import EmailMultiAlternatives
 from django.db import DatabaseError, IntegrityError
 from django.template.loader import render_to_string
@@ -13,6 +14,7 @@ from rest_framework.views import APIView
 from .models import NewsletterSubscriber
 from .serializers import NewsletterSubscribeSerializer
 from .throttles import NewsletterAnonThrottle
+from .tokens import build_unsubscribe_url, read_unsubscribe_token
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,12 @@ class SubscribeAPIView(APIView):
             ).strip()
             reply_to = [(getattr(settings, "SUPPORT_EMAIL", "") or from_email).strip()]
 
-            ctx = {"email": email, "source": source, "brand": "TRESSE"}
+            ctx = {
+                "email": email,
+                "source": source,
+                "brand": "TRESSE",
+                "unsubscribe_url": build_unsubscribe_url(email),
+            }
 
             try:
                 text_body = render_to_string("emails/accounts/newsletter_welcome.txt", ctx).strip()
@@ -90,3 +97,47 @@ class SubscribeAPIView(APIView):
             {"ok": True, "created": created, "email": email, "email_sent": email_sent},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class UnsubscribeAPIView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [NewsletterAnonThrottle]
+
+    def post(self, request, token):
+        try:
+            email = read_unsubscribe_token(token)
+        except signing.SignatureExpired:
+            return Response(
+                {"detail": "This unsubscribe link has expired."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except signing.BadSignature:
+            return Response(
+                {"detail": "This unsubscribe link is invalid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            subscriber = NewsletterSubscriber.objects.filter(email=email).first()
+            if subscriber is None:
+                return Response(
+                    {"detail": "Subscriber not found."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if subscriber.is_active:
+                subscriber.is_active = False
+                subscriber.save(update_fields=["is_active", "updated_at"])
+
+        except (IntegrityError, DatabaseError) as e:
+            logger.exception("Newsletter unsubscribe DB error for %s: %s", email, str(e))
+            if settings.DEBUG:
+                return Response(
+                    {"detail": f"DB error: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            return Response(
+                {"detail": "Server error."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response({"ok": True, "email": email}, status=status.HTTP_200_OK)
