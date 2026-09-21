@@ -415,14 +415,14 @@ class ProfileAPIView(APIView):
         profile, _ = UserProfile.objects.get_or_create(user=user)
 
         data = {
-            "firstName": user.first_name or "",
-            "lastName": user.last_name or "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
             "email": user.email or "",
-            "addressLine1": profile.address_line1 or "",
+            "address_line1": profile.address_line1 or "",
             "apartment": profile.apartment or "",
             "city": profile.city or "",
             "state": profile.state or "",
-            "postalCode": profile.postal_code or "",
+            "postal_code": profile.postal_code or "",
             "country": profile.country or "",
         }
         return Response(data, status=status.HTTP_200_OK)
@@ -438,12 +438,12 @@ class ProfileAPIView(APIView):
         with transaction.atomic():
             user_update_fields: list[str] = []
 
-            if "firstName" in v:
-                user.first_name = v.get("firstName", "") or ""
+            if "first_name" in v:
+                user.first_name = v.get("first_name", "") or ""
                 user_update_fields.append("first_name")
 
-            if "lastName" in v:
-                user.last_name = v.get("lastName", "") or ""
+            if "last_name" in v:
+                user.last_name = v.get("last_name", "") or ""
                 user_update_fields.append("last_name")
 
             if "email" in v:
@@ -461,30 +461,30 @@ class ProfileAPIView(APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-            if "addressLine1" in v:
-                profile.address_line1 = v.get("addressLine1", "") or ""
+            if "address_line1" in v:
+                profile.address_line1 = v.get("address_line1", "") or ""
             if "apartment" in v:
                 profile.apartment = v.get("apartment", "") or ""
             if "city" in v:
                 profile.city = v.get("city", "") or ""
             if "state" in v:
                 profile.state = v.get("state", "") or ""
-            if "postalCode" in v:
-                profile.postal_code = v.get("postalCode", "") or ""
+            if "postal_code" in v:
+                profile.postal_code = v.get("postal_code", "") or ""
             if "country" in v:
                 profile.country = v.get("country", "") or ""
 
             profile.save()
 
         refreshed = {
-            "firstName": user.first_name or "",
-            "lastName": user.last_name or "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
             "email": user.email or "",
-            "addressLine1": profile.address_line1 or "",
+            "address_line1": profile.address_line1 or "",
             "apartment": profile.apartment or "",
             "city": profile.city or "",
             "state": profile.state or "",
-            "postalCode": profile.postal_code or "",
+            "postal_code": profile.postal_code or "",
             "country": profile.country or "",
         }
         return Response(

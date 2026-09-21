@@ -552,16 +552,16 @@ class ProfileAPITestCase(TestCase):
     def test_get_profile_creates_if_missing(self):
         resp = self.client.get(reverse("profile"))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["firstName"], "Pro")
+        self.assertEqual(resp.data["first_name"], "Pro")
         self.assertTrue(UserProfile.objects.filter(user=self.user).exists())
 
     def test_put_profile_updates_fields(self):
         resp = self.client.put(
             reverse("profile"),
             {
-                "firstName": "Updated",
+                "first_name": "Updated",
                 "city": "Kyiv",
-                "postalCode": "01001",
+                "postal_code": "01001",
             },
             format="json",
         )
@@ -572,6 +572,56 @@ class ProfileAPITestCase(TestCase):
 
         profile = UserProfile.objects.get(user=self.user)
         self.assertEqual(profile.city, "Kyiv")
+        self.assertEqual(profile.postal_code, "01001")
+
+    def test_put_profile_with_frontend_payload_persists_and_get_returns_it(self):
+        # Exact shape of ProfileUpdatePayload / mapFormToApi in the frontend.
+        payload = {
+            "first_name": "Anna",
+            "last_name": "Smith",
+            "email": "anna.smith@example.com",
+            "address_line1": "123 Main St",
+            "apartment": "Apt 4",
+            "city": "Kyiv",
+            "state": "Kyiv Oblast",
+            "postal_code": "01001",
+            "country": "Ukraine",
+        }
+
+        resp = self.client.put(reverse("profile"), payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["profile"], payload)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, "Anna")
+        self.assertEqual(self.user.last_name, "Smith")
+        self.assertEqual(self.user.email, "anna.smith@example.com")
+
+        profile = UserProfile.objects.get(user=self.user)
+        self.assertEqual(profile.address_line1, "123 Main St")
+        self.assertEqual(profile.apartment, "Apt 4")
+        self.assertEqual(profile.city, "Kyiv")
+        self.assertEqual(profile.state, "Kyiv Oblast")
+        self.assertEqual(profile.postal_code, "01001")
+        self.assertEqual(profile.country, "Ukraine")
+
+        resp = self.client.get(reverse("profile"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, payload)
+
+    def test_put_profile_without_email_keeps_existing_email(self):
+        # mapFormToApi omits email when the field is empty.
+        resp = self.client.put(
+            reverse("profile"),
+            {"first_name": "Solo", "last_name": "Name", "postal_code": "02002"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "profile@example.com")
+        self.assertEqual(self.user.first_name, "Solo")
+        self.assertEqual(UserProfile.objects.get(user=self.user).postal_code, "02002")
 
     def test_put_profile_duplicate_email_rejected(self):
         _make_user("taken@example.com")

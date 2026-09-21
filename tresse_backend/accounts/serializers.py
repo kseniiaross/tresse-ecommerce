@@ -115,13 +115,13 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 
 class ProfileSerializer(serializers.Serializer):
-    firstName = serializers.CharField(required=False, allow_blank=True, max_length=150)
-    lastName = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
     email = serializers.EmailField(required=False)
 
-    addressLine1 = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    address_line1 = serializers.CharField(required=False, allow_blank=True, max_length=255)
     apartment = serializers.CharField(required=False, allow_blank=True, max_length=255)
     city = serializers.CharField(required=False, allow_blank=True, max_length=120)
     state = serializers.CharField(required=False, allow_blank=True, max_length=120)
-    postalCode = serializers.CharField(required=False, allow_blank=True, max_length=40)
+    postal_code = serializers.CharField(required=False, allow_blank=True, max_length=40)
     country = serializers.CharField(required=False, allow_blank=True, max_length=120)
