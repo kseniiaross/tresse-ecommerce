@@ -1,5 +1,5 @@
+import { isAxiosError } from "axios";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 
 import api from "../api/axiosInstance";
 
@@ -27,6 +27,8 @@ type Order = {
 	tracking_number?: string;
 	tracking_carrier?: string;
 	shipped_at?: string;
+	delivered_at?: string | null;
+	return_status?: string;
 	items: OrderItem[];
 };
 
@@ -102,15 +104,56 @@ const getTrackingUrl = (carrier: string, trackingNumber: string) => {
 	return "";
 };
 
+const RETURN_STATUS_LABELS: Record<string, string> = {
+	requested: "Requested",
+	approved: "Approved",
+	received: "Received",
+	refund_pending: "Refund pending",
+	refunded: "Refunded",
+	rejected: "Rejected",
+};
+
+const getReturnStatusLabel = (returnStatus: string) =>
+	RETURN_STATUS_LABELS[returnStatus] ?? titleCase(returnStatus);
+
+const RETURN_CONFIRM_TEXT =
+	"Request a return for this order? This can't be undone.";
+
+const RETURN_ERROR_FALLBACK = "Unable to request a return. Please try again.";
+
+const getReturnErrorMessage = (error: unknown) => {
+	if (isAxiosError(error)) {
+		const data: unknown = error.response?.data;
+
+		if (typeof data === "object" && data !== null) {
+			const detail = (data as Record<string, unknown>).detail;
+
+			if (typeof detail === "string" && detail.trim()) {
+				return detail.trim();
+			}
+		}
+	}
+
+	return RETURN_ERROR_FALLBACK;
+};
+
 const getCreatedAtMs = (order: Order) => {
 	const createdAt = new Date(order.created_at).getTime();
 
 	return Number.isFinite(createdAt) ? createdAt : null;
 };
 
-export default function OrderHistory() {
-	const navigate = useNavigate();
+const getDeliveredAtMs = (order: Order) => {
+	if (!order.delivered_at) {
+		return null;
+	}
 
+	const deliveredAt = new Date(order.delivered_at).getTime();
+
+	return Number.isFinite(deliveredAt) ? deliveredAt : null;
+};
+
+export default function OrderHistory() {
 	const [orders, setOrders] = useState<Order[]>([]);
 
 	const [loading, setLoading] = useState(true);
@@ -118,6 +161,8 @@ export default function OrderHistory() {
 	const [errorMsg, setErrorMsg] = useState("");
 
 	const [busyId, setBusyId] = useState<number | null>(null);
+
+	const [returningId, setReturningId] = useState<number | null>(null);
 
 	const [now, setNow] = useState(() => Date.now());
 
@@ -183,17 +228,17 @@ export default function OrderHistory() {
 
 	const isReturnable = useCallback(
 		(order: Order) => {
-			if (order.status !== "paid") {
+			if (order.status !== "paid" || order.return_status) {
 				return false;
 			}
 
-			const createdAt = getCreatedAtMs(order);
+			const deliveredAt = getDeliveredAtMs(order);
 
-			if (createdAt === null) {
+			if (deliveredAt === null) {
 				return false;
 			}
 
-			const age = now - createdAt;
+			const age = now - deliveredAt;
 
 			return age >= 0 && age <= RETURN_WINDOW_MS;
 		},
@@ -237,10 +282,31 @@ export default function OrderHistory() {
 		}
 	};
 
-	const goToReturns = (order: Order) => {
-		const orderReference = (order.public_id || String(order.id)).trim();
+	const requestReturn = async (orderId: number) => {
+		if (busyId !== null || returningId !== null) {
+			return;
+		}
 
-		navigate(`/help?topic=return&order=${encodeURIComponent(orderReference)}`);
+		if (!window.confirm(RETURN_CONFIRM_TEXT)) {
+			return;
+		}
+
+		try {
+			setReturningId(orderId);
+			setErrorMsg("");
+
+			const { data } = await api.post(`/orders/${orderId}/return/`, {});
+
+			setOrders((previous) =>
+				previous.map((order) =>
+					order.id === orderId ? (data as Order) : order,
+				),
+			);
+		} catch (error) {
+			setErrorMsg(getReturnErrorMessage(error));
+		} finally {
+			setReturningId(null);
+		}
 	};
 
 	const hasOrders = useMemo(() => orders.length > 0, [orders]);
@@ -329,6 +395,16 @@ export default function OrderHistory() {
 											{getStatusLabel(order.status)}
 										</div>
 									</div>
+
+									{order.return_status ? (
+										<div className="order-history__meta">
+											<div className="order-history__label">Return</div>
+
+											<div className="order-history__value order-history__value--strong">
+												{getReturnStatusLabel(order.return_status)}
+											</div>
+										</div>
+									) : null}
 
 									<div className="order-history__meta">
 										<div className="order-history__label">Total</div>
@@ -454,11 +530,11 @@ export default function OrderHistory() {
                             order-history__btn--secondary
                           "
 													onClick={() => {
-														goToReturns(order);
+														void requestReturn(order.id);
 													}}
-													disabled={busyId !== null}
+													disabled={busyId !== null || returningId !== null}
 												>
-													Return
+													{returningId === order.id ? "Requesting…" : "Return"}
 												</button>
 											) : null}
 										</div>

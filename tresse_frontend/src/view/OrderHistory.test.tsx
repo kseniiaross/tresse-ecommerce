@@ -14,18 +14,6 @@ vi.mock("../api/axiosInstance", () => ({
 	},
 }));
 
-const mockNavigate = vi.fn();
-vi.mock("react-router-dom", async () => {
-	const actual =
-		await vi.importActual<typeof import("react-router-dom")>(
-			"react-router-dom",
-		);
-	return {
-		...actual,
-		useNavigate: () => mockNavigate,
-	};
-});
-
 import api from "../api/axiosInstance";
 
 const mockedApi = api as unknown as {
@@ -285,28 +273,56 @@ describe("OrderHistory - cancel window (24 hours)", () => {
 	});
 });
 
-describe("OrderHistory - return window (14 days)", () => {
-	it("shows Return button within the 14-day window", async () => {
-		const recentDate = new Date(
-			FIXED_NOW - 5 * 24 * 60 * 60 * 1000,
-		).toISOString();
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const daysAgo = (days: number) =>
+	new Date(FIXED_NOW - days * DAY_MS).toISOString();
+
+function makeAxiosError(status: number, detail: string) {
+	return Object.assign(new Error(`Request failed with status code ${status}`), {
+		isAxiosError: true,
+		response: { status, data: { detail } },
+	});
+}
+
+describe("OrderHistory - return window (14 days from delivery)", () => {
+	let confirmSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+	});
+
+	afterEach(() => {
+		confirmSpy.mockRestore();
+	});
+
+	it("shows Return button within 14 days of delivery", async () => {
 		mockedApi.get.mockResolvedValueOnce({
-			data: [makeOrder({ created_at: recentDate })],
+			data: [makeOrder({ created_at: daysAgo(30), delivered_at: daysAgo(5) })],
 		});
 
 		renderOrderHistory();
 
 		expect(
-			await screen.findByRole("button", { name: /return/i }),
+			await screen.findByRole("button", { name: /^return$/i }),
 		).toBeInTheDocument();
 	});
 
-	it("hides Return button after the 14-day window has passed", async () => {
-		const oldDate = new Date(
-			FIXED_NOW - 15 * 24 * 60 * 60 * 1000,
-		).toISOString();
+	it("shows Return button on the last day of the window", async () => {
 		mockedApi.get.mockResolvedValueOnce({
-			data: [makeOrder({ created_at: oldDate })],
+			data: [makeOrder({ delivered_at: daysAgo(14) })],
+		});
+
+		renderOrderHistory();
+
+		expect(
+			await screen.findByRole("button", { name: /^return$/i }),
+		).toBeInTheDocument();
+	});
+
+	it("hides Return button when delivered_at is missing, even for a recent order", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [makeOrder({ created_at: daysAgo(1), delivered_at: null })],
 		});
 
 		renderOrderHistory();
@@ -317,22 +333,109 @@ describe("OrderHistory - return window (14 days)", () => {
 		).not.toBeInTheDocument();
 	});
 
-	it("navigates to the help page with return topic and order reference", async () => {
-		const recentDate = new Date(
-			FIXED_NOW - 5 * 24 * 60 * 60 * 1000,
-		).toISOString();
+	it("hides Return button more than 14 days after delivery, even for a recent order", async () => {
 		mockedApi.get.mockResolvedValueOnce({
-			data: [makeOrder({ created_at: recentDate })],
+			data: [makeOrder({ created_at: daysAgo(1), delivered_at: daysAgo(15) })],
+		});
+
+		renderOrderHistory();
+
+		await screen.findByText("TR-20260812-ABC123");
+		expect(
+			screen.queryByRole("button", { name: /return/i }),
+		).not.toBeInTheDocument();
+	});
+
+	it("hides Return button once a return has already been requested", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [
+				makeOrder({ delivered_at: daysAgo(2), return_status: "requested" }),
+			],
+		});
+
+		renderOrderHistory();
+
+		await screen.findByText("TR-20260812-ABC123");
+		expect(
+			screen.queryByRole("button", { name: /return/i }),
+		).not.toBeInTheDocument();
+		expect(screen.getByText("Requested")).toBeInTheDocument();
+	});
+
+	it("asks for confirmation and does not post when it is declined", async () => {
+		confirmSpy.mockReturnValue(false);
+		mockedApi.get.mockResolvedValueOnce({
+			data: [makeOrder({ delivered_at: daysAgo(2) })],
 		});
 
 		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 		renderOrderHistory();
 
-		const returnButton = await screen.findByRole("button", { name: /return/i });
-		await user.click(returnButton);
+		await user.click(await screen.findByRole("button", { name: /^return$/i }));
 
-		expect(mockNavigate).toHaveBeenCalledWith(
-			"/help?topic=return&order=TR-20260812-ABC123",
+		expect(confirmSpy).toHaveBeenCalledTimes(1);
+		expect(mockedApi.post).not.toHaveBeenCalled();
+	});
+
+	it("posts to the return endpoint and shows the return status in place", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [makeOrder({ delivered_at: daysAgo(2) })],
+		});
+		mockedApi.post.mockResolvedValueOnce({
+			data: makeOrder({
+				delivered_at: daysAgo(2),
+				return_status: "requested",
+				return_requested_at: new Date(FIXED_NOW).toISOString(),
+			}),
+		});
+
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		renderOrderHistory();
+
+		await user.click(await screen.findByRole("button", { name: /^return$/i }));
+
+		expect(confirmSpy).toHaveBeenCalledTimes(1);
+		expect(mockedApi.post).toHaveBeenCalledWith("/orders/1/return/", {});
+		expect(await screen.findByText("Requested")).toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: /return/i }),
+		).not.toBeInTheDocument();
+	});
+
+	it("shows the server's message when the return is rejected", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [makeOrder({ delivered_at: daysAgo(2) })],
+		});
+		mockedApi.post.mockRejectedValueOnce(
+			makeAxiosError(400, "Custom-sized items are final sale."),
 		);
+
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		renderOrderHistory();
+
+		await user.click(await screen.findByRole("button", { name: /^return$/i }));
+
+		expect(
+			await screen.findByText("Custom-sized items are final sale."),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: /^return$/i }),
+		).toBeInTheDocument();
+	});
+
+	it("falls back to a generic message when the failure has no server message", async () => {
+		mockedApi.get.mockResolvedValueOnce({
+			data: [makeOrder({ delivered_at: daysAgo(2) })],
+		});
+		mockedApi.post.mockRejectedValueOnce(new Error("network error"));
+
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		renderOrderHistory();
+
+		await user.click(await screen.findByRole("button", { name: /^return$/i }));
+
+		expect(
+			await screen.findByText("Unable to request a return. Please try again."),
+		).toBeInTheDocument();
 	});
 });
