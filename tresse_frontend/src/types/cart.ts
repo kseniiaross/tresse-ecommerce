@@ -43,6 +43,7 @@ export interface CartDto {
  * We support both { image_url } and legacy { image } for safety.
  */
 export type GuestCartItem = {
+	lineId: string; // stable per-line id, distinct from id + product_size_id
 	id: number; // product id
 	product_size_id: number; // selected size variant id
 	quantity: number;

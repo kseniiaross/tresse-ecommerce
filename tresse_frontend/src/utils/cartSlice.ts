@@ -25,6 +25,7 @@ export type CustomLengthFields = {
 export type GuestCartItem = Product &
 	CustomMeasurements &
 	CustomLengthFields & {
+		lineId: string;
 		quantity: number;
 		product_size_id: number;
 		sizeName?: string;
@@ -50,6 +51,38 @@ const isBrowser =
 
 const LS_KEY = "guest_cart";
 
+// Stable per-line identifier, distinct from product id + size id so two
+// lines for the same product/size with different custom measurements or
+// length don't collide.
+function createLineId(): string {
+	if (
+		typeof crypto !== "undefined" &&
+		typeof crypto.randomUUID === "function"
+	) {
+		return crypto.randomUUID();
+	}
+
+	return `line_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+// Assigns a lineId to any item that predates this field (carts saved
+// before this change). Returns whether anything changed.
+function backfillLineIds(state: GuestCartState): boolean {
+	let changed = false;
+
+	state.items = state.items.map((item) => {
+		if (item.lineId) {
+			return item;
+		}
+
+		changed = true;
+
+		return { ...item, lineId: createLineId() };
+	});
+
+	return changed;
+}
+
 function loadFromLS(): GuestCartState | null {
 	if (!isBrowser) {
 		return null;
@@ -68,7 +101,13 @@ function loadFromLS(): GuestCartState | null {
 			const rec = parsed as Record<string, unknown>;
 
 			if (Array.isArray(rec.items)) {
-				return parsed as GuestCartState;
+				const state = parsed as GuestCartState;
+
+				if (backfillLineIds(state)) {
+					saveToLS(state);
+				}
+
+				return state;
 			}
 		}
 	} catch {
@@ -217,6 +256,8 @@ const cartSlice = createSlice({
 				state.items.push({
 					...product,
 
+					lineId: createLineId(),
+
 					product_size_id,
 
 					sizeName,
@@ -257,16 +298,11 @@ const cartSlice = createSlice({
 		removeFromCart: (
 			state,
 			action: PayloadAction<{
-				id: number;
-				product_size_id: number;
+				lineId: string;
 			}>,
 		) => {
 			state.items = state.items.filter(
-				(item) =>
-					!(
-						item.id === action.payload.id &&
-						item.product_size_id === action.payload.product_size_id
-					),
+				(item) => item.lineId !== action.payload.lineId,
 			);
 
 			saveToLS(state);
@@ -275,15 +311,12 @@ const cartSlice = createSlice({
 		updateQuantity: (
 			state,
 			action: PayloadAction<{
-				id: number;
-				product_size_id: number;
+				lineId: string;
 				quantity: number;
 			}>,
 		) => {
 			const item = state.items.find(
-				(current) =>
-					current.id === action.payload.id &&
-					current.product_size_id === action.payload.product_size_id,
+				(current) => current.lineId === action.payload.lineId,
 			);
 
 			if (!item) {
@@ -299,15 +332,12 @@ const cartSlice = createSlice({
 			state,
 			action: PayloadAction<
 				CustomMeasurements & {
-					id: number;
-					product_size_id: number;
+					lineId: string;
 				}
 			>,
 		) => {
 			const item = state.items.find(
-				(current) =>
-					current.id === action.payload.id &&
-					current.product_size_id === action.payload.product_size_id,
+				(current) => current.lineId === action.payload.lineId,
 			);
 
 			if (!item) {
@@ -340,15 +370,12 @@ const cartSlice = createSlice({
 		setItemMaxQty: (
 			state,
 			action: PayloadAction<{
-				id: number;
-				product_size_id: number;
+				lineId: string;
 				maxQty: number;
 			}>,
 		) => {
 			const item = state.items.find(
-				(current) =>
-					current.id === action.payload.id &&
-					current.product_size_id === action.payload.product_size_id,
+				(current) => current.lineId === action.payload.lineId,
 			);
 
 			if (!item) {

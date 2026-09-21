@@ -19,8 +19,13 @@ function emptyState(): GuestCartState {
 	return { items: [] };
 }
 
+let lineIdCounter = 0;
+
 function makeItem(overrides: Partial<GuestCartItem> = {}): GuestCartItem {
+	lineIdCounter += 1;
+
 	return {
+		lineId: `line-${lineIdCounter}`,
 		id: 1,
 		name: "Sweater",
 		price: "50",
@@ -54,6 +59,8 @@ describe("addToCart", () => {
 		expect(state.items).toHaveLength(1);
 		expect(state.items[0].quantity).toBe(1);
 		expect(state.items[0].product_size_id).toBe(10);
+		expect(typeof state.items[0].lineId).toBe("string");
+		expect(state.items[0].lineId.length).toBeGreaterThan(0);
 	});
 
 	it("increments quantity when adding the same product+size+measurements again", () => {
@@ -99,6 +106,7 @@ describe("addToCart", () => {
 			}),
 		);
 		expect(state.items).toHaveLength(2);
+		expect(state.items[0].lineId).not.toBe(state.items[1].lineId);
 	});
 
 	it("treats different custom length selection as a separate line item", () => {
@@ -188,78 +196,128 @@ describe("addToCart", () => {
 });
 
 describe("removeFromCart", () => {
-	it("removes the matching item by id + product_size_id", () => {
+	it("removes the matching item by lineId", () => {
 		const state: GuestCartState = {
 			items: [
-				makeItem({ id: 1, product_size_id: 10 }),
-				makeItem({ id: 2, product_size_id: 20 }),
+				makeItem({ lineId: "line-a", id: 1, product_size_id: 10 }),
+				makeItem({ lineId: "line-b", id: 2, product_size_id: 20 }),
 			],
 		};
-		const next = reducer(state, removeFromCart({ id: 1, product_size_id: 10 }));
+		const next = reducer(state, removeFromCart({ lineId: "line-a" }));
 		expect(next.items).toHaveLength(1);
 		expect(next.items[0].id).toBe(2);
 	});
 
 	it("does nothing if item not found", () => {
 		const state: GuestCartState = {
-			items: [makeItem({ id: 1, product_size_id: 10 })],
+			items: [makeItem({ lineId: "line-a" })],
 		};
-		const next = reducer(
-			state,
-			removeFromCart({ id: 99, product_size_id: 99 }),
-		);
+		const next = reducer(state, removeFromCart({ lineId: "unknown" }));
 		expect(next.items).toHaveLength(1);
+	});
+
+	it("removing one of two lines for the same product+size (different measurements) leaves the other untouched", () => {
+		const lineA = makeItem({
+			lineId: "line-a",
+			id: 1,
+			product_size_id: 10,
+			custom_bust: "90",
+			custom_waist: "70",
+		});
+		const lineB = makeItem({
+			lineId: "line-b",
+			id: 1,
+			product_size_id: 10,
+			custom_bust: "95",
+			custom_waist: "75",
+		});
+		const state: GuestCartState = { items: [lineA, lineB] };
+
+		const next = reducer(state, removeFromCart({ lineId: "line-b" }));
+
+		expect(next.items).toHaveLength(1);
+		expect(next.items[0]).toEqual(lineA);
 	});
 });
 
 describe("updateQuantity", () => {
 	it("updates quantity of matching item", () => {
-		const state: GuestCartState = { items: [makeItem({ quantity: 1 })] };
+		const state: GuestCartState = {
+			items: [makeItem({ lineId: "line-a", quantity: 1 })],
+		};
 		const next = reducer(
 			state,
-			updateQuantity({ id: 1, product_size_id: 10, quantity: 5 }),
+			updateQuantity({ lineId: "line-a", quantity: 5 }),
 		);
 		expect(next.items[0].quantity).toBe(5);
 	});
 
 	it("clamps quantity to maxQty", () => {
 		const state: GuestCartState = {
-			items: [makeItem({ quantity: 1, maxQty: 3 })],
+			items: [makeItem({ lineId: "line-a", quantity: 1, maxQty: 3 })],
 		};
 		const next = reducer(
 			state,
-			updateQuantity({ id: 1, product_size_id: 10, quantity: 99 }),
+			updateQuantity({ lineId: "line-a", quantity: 99 }),
 		);
 		expect(next.items[0].quantity).toBe(3);
 	});
 
 	it("clamps quantity below 1 to 1", () => {
-		const state: GuestCartState = { items: [makeItem({ quantity: 5 })] };
+		const state: GuestCartState = {
+			items: [makeItem({ lineId: "line-a", quantity: 5 })],
+		};
 		const next = reducer(
 			state,
-			updateQuantity({ id: 1, product_size_id: 10, quantity: -2 }),
+			updateQuantity({ lineId: "line-a", quantity: -2 }),
 		);
 		expect(next.items[0].quantity).toBe(1);
 	});
 
 	it("does nothing for unknown item", () => {
-		const state: GuestCartState = { items: [makeItem()] };
+		const state: GuestCartState = { items: [makeItem({ lineId: "line-a" })] };
 		const next = reducer(
 			state,
-			updateQuantity({ id: 99, product_size_id: 99, quantity: 5 }),
+			updateQuantity({ lineId: "unknown", quantity: 5 }),
 		);
 		expect(next.items[0].quantity).toBe(1);
+	});
+
+	it("updating the quantity of one of two lines for the same product+size (different measurements) leaves the other untouched", () => {
+		const lineA = makeItem({
+			lineId: "line-a",
+			id: 1,
+			product_size_id: 10,
+			quantity: 1,
+			custom_bust: "90",
+		});
+		const lineB = makeItem({
+			lineId: "line-b",
+			id: 1,
+			product_size_id: 10,
+			quantity: 1,
+			custom_bust: "95",
+		});
+		const state: GuestCartState = { items: [lineA, lineB] };
+
+		const next = reducer(
+			state,
+			updateQuantity({ lineId: "line-b", quantity: 4 }),
+		);
+
+		const [nextA, nextB] = next.items;
+		expect(nextA.quantity).toBe(1);
+		expect(nextB.quantity).toBe(4);
 	});
 });
 
 describe("updateCustomMeasurements", () => {
 	it("updates measurement fields on matching item", () => {
-		const state: GuestCartState = { items: [makeItem()] };
+		const state: GuestCartState = { items: [makeItem({ lineId: "line-a" })] };
 		const next = reducer(
 			state,
 			updateCustomMeasurements({
-				id: 1,
-				product_size_id: 10,
+				lineId: "line-a",
 				custom_bust: "90",
 				custom_waist: "70",
 			}),
@@ -267,6 +325,39 @@ describe("updateCustomMeasurements", () => {
 		expect(next.items[0].custom_bust).toBe("90");
 		expect(next.items[0].custom_waist).toBe("70");
 		expect(next.items[0].custom_hips).toBe("");
+	});
+
+	it("updating the measurements of one of two lines for the same product+size leaves the other untouched", () => {
+		const lineA = makeItem({
+			lineId: "line-a",
+			id: 1,
+			product_size_id: 10,
+			custom_bust: "90",
+			custom_waist: "70",
+		});
+		const lineB = makeItem({
+			lineId: "line-b",
+			id: 1,
+			product_size_id: 10,
+			custom_bust: "95",
+			custom_waist: "75",
+		});
+		const state: GuestCartState = { items: [lineA, lineB] };
+
+		const next = reducer(
+			state,
+			updateCustomMeasurements({
+				lineId: "line-b",
+				custom_bust: "100",
+				custom_waist: "80",
+			}),
+		);
+
+		const [nextA, nextB] = next.items;
+		expect(nextA.custom_bust).toBe("90");
+		expect(nextA.custom_waist).toBe("70");
+		expect(nextB.custom_bust).toBe("100");
+		expect(nextB.custom_waist).toBe("80");
 	});
 });
 
@@ -280,23 +371,96 @@ describe("clearCart", () => {
 
 describe("setItemMaxQty", () => {
 	it("sets maxQty and clamps current quantity down if needed", () => {
-		const state: GuestCartState = { items: [makeItem({ quantity: 5 })] };
-		const next = reducer(
-			state,
-			setItemMaxQty({ id: 1, product_size_id: 10, maxQty: 2 }),
-		);
+		const state: GuestCartState = {
+			items: [makeItem({ lineId: "line-a", quantity: 5 })],
+		};
+		const next = reducer(state, setItemMaxQty({ lineId: "line-a", maxQty: 2 }));
 		expect(next.items[0].maxQty).toBe(2);
 		expect(next.items[0].quantity).toBe(2);
 	});
 
 	it("ignores invalid maxQty (0 or negative)", () => {
-		const state: GuestCartState = { items: [makeItem({ quantity: 3 })] };
-		const next = reducer(
-			state,
-			setItemMaxQty({ id: 1, product_size_id: 10, maxQty: 0 }),
-		);
+		const state: GuestCartState = {
+			items: [makeItem({ lineId: "line-a", quantity: 3 })],
+		};
+		const next = reducer(state, setItemMaxQty({ lineId: "line-a", maxQty: 0 }));
 		expect(next.items[0].maxQty).toBeUndefined();
 		expect(next.items[0].quantity).toBe(3);
+	});
+});
+
+describe("loading a cart saved before lineId existed", () => {
+	it("assigns a lineId to a stored line that lacks one", async () => {
+		localStorage.setItem(
+			"guest_cart",
+			JSON.stringify({
+				items: [
+					{
+						id: 1,
+						name: "Sweater",
+						price: "50",
+						product_size_id: 10,
+						quantity: 1,
+					},
+				],
+			}),
+		);
+
+		vi.resetModules();
+		const fresh = await import("./cartSlice");
+		const state = fresh.default(undefined, { type: "@@INIT" });
+
+		expect(state.items).toHaveLength(1);
+		expect(typeof state.items[0].lineId).toBe("string");
+		expect(state.items[0].lineId.length).toBeGreaterThan(0);
+	});
+
+	it("persists the backfilled lineId to localStorage", async () => {
+		localStorage.setItem(
+			"guest_cart",
+			JSON.stringify({
+				items: [
+					{
+						id: 1,
+						name: "Sweater",
+						price: "50",
+						product_size_id: 10,
+						quantity: 1,
+					},
+				],
+			}),
+		);
+
+		vi.resetModules();
+		await import("./cartSlice");
+
+		const saved = JSON.parse(localStorage.getItem("guest_cart") ?? "{}");
+		expect(typeof saved.items[0].lineId).toBe("string");
+		expect(saved.items[0].lineId.length).toBeGreaterThan(0);
+	});
+
+	it("keeps the existing lineId of a stored line that already has one", async () => {
+		localStorage.setItem(
+			"guest_cart",
+			JSON.stringify({
+				items: [
+					{
+						lineId: "already-there",
+						id: 1,
+						name: "Sweater",
+						price: "50",
+						product_size_id: 10,
+						quantity: 1,
+					},
+				],
+			}),
+		);
+
+		vi.resetModules();
+		const fresh = await import("./cartSlice");
+		const state = fresh.default(undefined, { type: "@@INIT" });
+
+		expect(state.items[0].lineId).toBe("already-there");
 	});
 });
 

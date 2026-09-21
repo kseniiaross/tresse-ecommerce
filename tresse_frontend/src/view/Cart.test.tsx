@@ -62,6 +62,7 @@ const rootReducer = combineReducers({
 
 function makeGuestItem(overrides: Partial<any> = {}) {
 	return {
+		lineId: "line-1",
 		id: 1,
 		name: "Sweater",
 		price: 50,

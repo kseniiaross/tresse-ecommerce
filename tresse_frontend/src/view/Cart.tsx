@@ -319,7 +319,7 @@ export default function Cart() {
 	const handleQuantityChange = (
 		id: number,
 		nextQty: number,
-		guestProductSizeId?: number,
+		guestLineId?: string,
 		maxQty?: number,
 	) => {
 		const clamped = clampQty(nextQty, maxQty);
@@ -335,37 +335,33 @@ export default function Cart() {
 			return;
 		}
 
-		if (guestProductSizeId == null) {
+		if (guestLineId == null) {
 			return;
 		}
 
 		dispatch(
 			updateGuestQty({
-				id,
-
-				product_size_id: guestProductSizeId,
+				lineId: guestLineId,
 
 				quantity: clamped,
 			}),
 		);
 	};
 
-	const handleRemove = (id: number, guestProductSizeId?: number) => {
+	const handleRemove = (id: number, guestLineId?: string) => {
 		if (usingServer) {
 			dispatch(serverCart.removeCartItem(id));
 
 			return;
 		}
 
-		if (guestProductSizeId == null) {
+		if (guestLineId == null) {
 			return;
 		}
 
 		dispatch(
 			removeGuestItem({
-				id,
-
-				product_size_id: guestProductSizeId,
+				lineId: guestLineId,
 			}),
 		);
 	};
@@ -388,9 +384,7 @@ export default function Cart() {
 
 			dispatch(
 				updateCustomMeasurements({
-					id: guestItem.id,
-
-					product_size_id: guestItem.product_size_id,
+					lineId: guestItem.lineId,
 
 					...data,
 				}),
@@ -660,10 +654,7 @@ export default function Cart() {
 							const unitPrice = getGuestUnitPrice(item);
 
 							return (
-								<li
-									key={`${item.id}-${item.product_size_id}`}
-									className="cart-item"
-								>
+								<li key={item.lineId} className="cart-item">
 									<div className="cart-item__media">
 										<img
 											src={imgSrc}
@@ -682,9 +673,7 @@ export default function Cart() {
 											<button
 												type="button"
 												className="cart-item__remove"
-												onClick={() =>
-													handleRemove(item.id, item.product_size_id)
-												}
+												onClick={() => handleRemove(item.id, item.lineId)}
 											>
 												Remove
 											</button>
@@ -759,7 +748,7 @@ export default function Cart() {
 														handleQuantityChange(
 															item.id,
 															item.quantity - 1,
-															item.product_size_id,
+															item.lineId,
 															maxQty,
 														)
 													}
@@ -781,7 +770,7 @@ export default function Cart() {
 															handleQuantityChange(
 																item.id,
 																1,
-																item.product_size_id,
+																item.lineId,
 																maxQty,
 															);
 
@@ -795,7 +784,7 @@ export default function Cart() {
 
 															digitsOnly === "" ? 1 : Number(digitsOnly),
 
-															item.product_size_id,
+															item.lineId,
 															maxQty,
 														);
 													}}
@@ -813,7 +802,7 @@ export default function Cart() {
 														handleQuantityChange(
 															item.id,
 															item.quantity + 1,
-															item.product_size_id,
+															item.lineId,
 															maxQty,
 														)
 													}
