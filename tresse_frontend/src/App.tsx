@@ -23,6 +23,7 @@ import { fetchWishlistCount } from "./store/wishListSlice";
 import type { User } from "./types/user";
 import { logout, setCredentials } from "./utils/authSlice";
 import PrivateRoute from "./utils/PrivateRoute";
+import { initMarketingPixels } from "./utils/pixelLoader";
 import About from "./view/About";
 import Cart from "./view/Cart";
 import Contact from "./view/Contact";
@@ -176,6 +177,10 @@ export default function App() {
 
 		return () => setOnUnauthorized(null);
 	}, [dispatch]);
+
+	useEffect(() => {
+		initMarketingPixels();
+	}, []);
 
 	return (
 		<Router>
