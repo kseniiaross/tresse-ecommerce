@@ -270,8 +270,13 @@ describe("updateCartItemMeasurements thunk", () => {
 	});
 });
 
+let lineIdCounter = 0;
+
 function makeGuestItem(overrides: Partial<any> = {}) {
+	lineIdCounter += 1;
+
 	return {
+		lineId: `line-${lineIdCounter}`,
 		id: 1,
 		name: "Sweater",
 		price: 50,
@@ -334,7 +339,7 @@ describe("mergeGuestCart thunk", () => {
 		expect(store.getState().cart.items).toEqual([]);
 	});
 
-	it("does not clear guest cart if any request fails", async () => {
+	it("removes only the succeeded line after a partial failure, leaving the failed line for the next attempt", async () => {
 		mockedGetToken.mockReturnValue("fake-token");
 		mockedApi.post
 			.mockResolvedValueOnce({ data: { id: 1 } })
@@ -343,15 +348,68 @@ describe("mergeGuestCart thunk", () => {
 		const store = makeStore({
 			cart: {
 				items: [
-					makeGuestItem({ id: 1, product_size_id: 10, quantity: 1 }),
-					makeGuestItem({ id: 2, product_size_id: 20, quantity: 1 }),
+					makeGuestItem({
+						lineId: "line-ok",
+						id: 1,
+						product_size_id: 10,
+						quantity: 1,
+					}),
+					makeGuestItem({
+						lineId: "line-fail",
+						id: 2,
+						product_size_id: 20,
+						quantity: 1,
+					}),
 				],
 			},
 		});
 
 		await store.dispatch(mergeGuestCart());
 
-		expect(store.getState().cart.items).toHaveLength(2);
+		const items = store.getState().cart.items;
+		expect(items).toHaveLength(1);
+		expect(items[0].lineId).toBe("line-fail");
+	});
+
+	it("a second merge attempt only posts the line that failed the first time", async () => {
+		mockedGetToken.mockReturnValue("fake-token");
+		mockedApi.post
+			.mockResolvedValueOnce({ data: { id: 1 } })
+			.mockRejectedValueOnce({ response: { status: 500 } });
+
+		const store = makeStore({
+			cart: {
+				items: [
+					makeGuestItem({
+						lineId: "line-ok",
+						id: 1,
+						product_size_id: 10,
+						quantity: 1,
+					}),
+					makeGuestItem({
+						lineId: "line-fail",
+						id: 2,
+						product_size_id: 20,
+						quantity: 1,
+					}),
+				],
+			},
+		});
+
+		await store.dispatch(mergeGuestCart());
+		expect(mockedApi.post).toHaveBeenCalledTimes(2);
+
+		mockedApi.post.mockClear();
+		mockedApi.post.mockResolvedValueOnce({ data: { id: 2 } });
+
+		await store.dispatch(mergeGuestCart());
+
+		expect(mockedApi.post).toHaveBeenCalledTimes(1);
+		expect(mockedApi.post).toHaveBeenCalledWith(
+			"/products/cart/items/",
+			expect.objectContaining({ product_size_id: 20 }),
+		);
+		expect(store.getState().cart.items).toEqual([]);
 	});
 
 	// custom_length_cm and custom_length_surcharge are read_only on

@@ -8,7 +8,7 @@ import api from "../api/axiosInstance";
 import type { CartDto, CartItemDto } from "../types/cart";
 import { getAccessToken } from "../types/token";
 import {
-	clearCart as clearGuestCart,
+	removeFromCart as removeGuestCartLine,
 	selectGuestCartItems,
 } from "../utils/cartSlice";
 import type { RootState } from ".";
@@ -138,8 +138,15 @@ export const mergeGuestCart = createAsyncThunk<
 			return;
 		}
 
-		const requests = guestItems.map((it) =>
-			postCartItem({
+		// Each line is removed from the guest cart as soon as its own request
+		// succeeds, addressed by its lineId — not in bulk once every request
+		// settles. Otherwise a partial failure keeps the whole guest cart,
+		// including lines already transferred, and the next merge attempt
+		// posts them again: CartItemAPIView adds the quantity onto the
+		// existing server item, so the customer ends up with double the
+		// quantity for that line. Failed lines stay for the next attempt.
+		const requests = guestItems.map(async (it) => {
+			await postCartItem({
 				product_size_id: it.product_size_id,
 
 				quantity: it.quantity,
@@ -163,16 +170,16 @@ export const mergeGuestCart = createAsyncThunk<
 				custom_cup: it.custom_cup,
 
 				custom_fit_notes: it.custom_fit_notes,
-			}),
-		);
+			});
+
+			dispatch(removeGuestCartLine({ lineId: it.lineId }));
+		});
 
 		const results = await Promise.allSettled(requests);
 
-		const allOk = results.every((result) => result.status === "fulfilled");
+		const anyFailed = results.some((result) => result.status === "rejected");
 
-		if (allOk) {
-			dispatch(clearGuestCart());
-		} else {
+		if (anyFailed) {
 			console.warn("mergeGuestCart: some requests failed", results);
 		}
 	},
