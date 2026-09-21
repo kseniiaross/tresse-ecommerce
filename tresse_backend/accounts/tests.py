@@ -533,6 +533,53 @@ class AccountDeleteAndRestoreFlowTestCase(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_restore_confirm_common_password_rejected(self):
+        self.user.mark_deleted()
+        uidb64, token = _make_token_link(self.user)
+
+        client = APIClient()
+        resp = client.post(
+            reverse("restore-confirm"),
+            {"uidb64": uidb64, "token": token, "new_password": "password123"},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("This password is too common.", resp.data["new_password"])
+
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_active)
+        self.assertIsNotNone(self.user.deleted_at)
+
+    def test_restore_confirm_numeric_password_rejected(self):
+        self.user.mark_deleted()
+        uidb64, token = _make_token_link(self.user)
+
+        client = APIClient()
+        resp = client.post(
+            reverse("restore-confirm"),
+            {"uidb64": uidb64, "token": token, "new_password": "48151623"},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("This password is entirely numeric.", resp.data["new_password"])
+
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_active)
+
+    def test_restore_confirm_strong_password_restores_account(self):
+        self.user.mark_deleted()
+        uidb64, token = _make_token_link(self.user)
+
+        client = APIClient()
+        resp = client.post(
+            reverse("restore-confirm"),
+            {"uidb64": uidb64, "token": token, "new_password": "Zx9-plum-Harbor-42"},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_active)
+        self.assertIsNone(self.user.deleted_at)
+        self.assertTrue(self.user.check_password("Zx9-plum-Harbor-42"))
+
 
 # ============================================================
 # API: Profile

@@ -6,7 +6,9 @@ from datetime import timedelta
 import requests
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -367,11 +369,14 @@ class AccountRestoreConfirmAPIView(APIView):
         if not uidb64 or not token:
             return Response({"detail": "Invalid restore link."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if new_password and len(new_password) < 8:
-            return Response(
-                {"detail": "Password must be at least 8 characters."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if new_password:
+            try:
+                validate_password(new_password)
+            except DjangoValidationError as exc:
+                return Response(
+                    {"new_password": list(exc.messages)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         generic_err = {"detail": "Invalid or expired restore link."}
 
