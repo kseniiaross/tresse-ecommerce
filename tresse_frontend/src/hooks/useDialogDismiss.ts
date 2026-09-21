@@ -1,5 +1,14 @@
 import { type RefObject, useEffect, useRef } from "react";
 
+const FOCUSABLE_SELECTOR =
+	'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+	return Array.from(
+		container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+	);
+}
+
 /**
  * Wires up the standard keyboard/focus behavior for a modal dialog:
  *  - moves focus into the dialog when it opens, and restores it to
@@ -8,7 +17,14 @@ import { type RefObject, useEffect, useRef } from "react";
  *  - closes when a click starts on the overlay itself (attached
  *    imperatively via addEventListener, so the overlay stays a plain,
  *    non-interactive backdrop for assistive tech rather than an element
- *    with a JSX onClick/role combo).
+ *    with a JSX onClick/role combo);
+ *  - traps Tab/Shift+Tab so focus cycles among the dialog's own
+ *    focusable descendants instead of escaping to the page underneath:
+ *    Tab on the last descendant wraps to the first, Shift+Tab on the
+ *    first wraps to the last, and either from the dialog container
+ *    itself (its initial focus target) moves to the first (Tab) or last
+ *    (Shift+Tab) descendant. With no focusable descendants, focus stays
+ *    on the container.
  *
  * `onClose` is read through a ref that's updated every render, so callers
  * can pass a fresh inline callback each render (as is typical) without the
@@ -43,7 +59,44 @@ export function useDialogDismiss(
 		contentRef.current?.focus();
 
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onCloseRef.current();
+			if (e.key === "Escape") {
+				onCloseRef.current();
+				return;
+			}
+
+			if (e.key !== "Tab") return;
+
+			const container = contentRef.current;
+			if (!container) return;
+
+			const focusables = getFocusableElements(container);
+			const activeEl = document.activeElement as HTMLElement | null;
+
+			if (focusables.length === 0) {
+				e.preventDefault();
+				container.focus();
+				return;
+			}
+
+			const first = focusables[0];
+			const last = focusables[focusables.length - 1];
+
+			if (activeEl === container) {
+				e.preventDefault();
+				(e.shiftKey ? last : first).focus();
+				return;
+			}
+
+			if (e.shiftKey && activeEl === first) {
+				e.preventDefault();
+				last.focus();
+				return;
+			}
+
+			if (!e.shiftKey && activeEl === last) {
+				e.preventDefault();
+				first.focus();
+			}
 		};
 
 		const onOverlayMouseDown = (e: MouseEvent) => {
