@@ -45,8 +45,21 @@ vi.mock("react-router-dom", async () => {
 });
 
 import { registerUser } from "../api/auth";
+import api from "../api/axiosInstance";
+import { getAccessToken } from "../types/token";
 
 const mockedRegisterUser = registerUser as unknown as ReturnType<typeof vi.fn>;
+
+const mockedApi = api as unknown as {
+	get: ReturnType<typeof vi.fn>;
+	post: ReturnType<typeof vi.fn>;
+	put: ReturnType<typeof vi.fn>;
+	delete: ReturnType<typeof vi.fn>;
+};
+
+const mockedGetAccessToken = getAccessToken as unknown as ReturnType<
+	typeof vi.fn
+>;
 
 function renderRegister(initialPath = "/register") {
 	const store = configureStore({
@@ -70,6 +83,10 @@ function renderRegister(initialPath = "/register") {
 beforeEach(() => {
 	vi.clearAllMocks();
 	localStorage.clear();
+	// hasToken() in serverCartSlice.ts reads this directly, independent of
+	// Redux state, so it's reset explicitly rather than relying on a
+	// previous test not having changed it.
+	mockedGetAccessToken.mockReturnValue(null);
 });
 
 describe("Register form validation", () => {
@@ -229,5 +246,40 @@ describe("Register submission", () => {
 			await screen.findByText("User with this email already exists."),
 		).toBeInTheDocument();
 		expect(mockNavigate).not.toHaveBeenCalled();
+	});
+
+	// mergeGuestCart/fetchCart are wrapped in their own non-blocking
+	// try/catch (matching Authorization.tsx) precisely so a post-registration
+	// fetchCart failure — the account already exists, the user is already
+	// logged in — doesn't surface as a false "Registration failed" and send
+	// the user into a retry that then fails with "already exists".
+	it("still navigates and shows no error when fetchCart fails after a successful registration", async () => {
+		mockedRegisterUser.mockResolvedValueOnce({
+			access: "token123",
+			refresh: "refresh123",
+			user: {
+				id: 1,
+				email: "anna@example.com",
+				first_name: "Anna",
+				last_name: "Smith",
+			},
+		});
+		mockedGetAccessToken.mockReturnValue("token123");
+		mockedApi.get.mockRejectedValueOnce(new Error("network down"));
+
+		const user = userEvent.setup();
+		renderRegister();
+
+		await fillValidForm(user);
+		await user.click(screen.getByRole("button", { name: /register/i }));
+
+		await waitFor(() => {
+			expect(mockNavigate).toHaveBeenCalledWith("/", { replace: true });
+		});
+
+		expect(
+			screen.queryByText("Registration failed. Please try again."),
+		).not.toBeInTheDocument();
+		expect(screen.queryByRole("status")).not.toBeInTheDocument();
 	});
 });

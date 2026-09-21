@@ -167,8 +167,18 @@ export default function Register() {
 
 			dispatch(setCredentials({ token: access, user }));
 
-			await dispatch(mergeGuestCart()).unwrap();
-			await dispatch(fetchCart()).unwrap();
+			try {
+				await dispatch(mergeGuestCart()).unwrap();
+			} catch (e) {
+				if (import.meta.env.DEV) console.warn("mergeGuestCart failed:", e);
+			}
+
+			try {
+				await dispatch(fetchCart()).unwrap();
+			} catch (e) {
+				if (import.meta.env.DEV) console.warn("fetchCart failed:", e);
+			}
+
 			dispatch(fetchWishlistCount());
 
 			navigate(safeNext ?? "/", { replace: true });
