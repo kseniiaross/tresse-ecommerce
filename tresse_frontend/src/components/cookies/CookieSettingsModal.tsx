@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useDialogDismiss } from "../../hooks/useDialogDismiss";
 import type { CookieConsentPreferences } from "./cookiePreferences";
 
 type Props = {
@@ -15,10 +16,27 @@ export default function CookieSettingsModal({
 	const [analytics, setAnalytics] = useState(initialPreferences.analytics);
 	const [marketing, setMarketing] = useState(initialPreferences.marketing);
 
+	const overlayRef = useRef<HTMLDivElement>(null);
+	const contentRef = useRef<HTMLElement>(null);
+
+	useDialogDismiss(overlayRef, contentRef, onClose);
+
+	useEffect(() => {
+		// Lock body scroll while the modal is open.
+		const prevOverflow = document.body.style.overflow;
+		document.body.style.overflow = "hidden";
+
+		return () => {
+			document.body.style.overflow = prevOverflow;
+		};
+	}, []);
+
 	return (
-		<div className="cookieModalOverlay" role="presentation">
+		<div className="cookieModalOverlay" ref={overlayRef}>
 			<section
 				className="cookieModal"
+				ref={contentRef}
+				tabIndex={-1}
 				role="dialog"
 				aria-modal="true"
 				aria-labelledby="cookie-settings-title"
