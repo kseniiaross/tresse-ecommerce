@@ -525,8 +525,9 @@ export default function Dashboard() {
 						</h3>
 
 						<p className="dashboard__modalText">
-							This action will permanently delete your account. A confirmation
-							email will be sent to you.
+							This action will deactivate your account. You can restore it
+							within 30 days using the link we'll email you — after that, it can
+							no longer be restored.
 						</p>
 
 						<div className="dashboard__modalStatus" aria-live="polite">
