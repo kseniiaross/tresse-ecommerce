@@ -376,6 +376,25 @@ class PasswordResetFlowTestCase(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         mock_send.assert_called_once()
 
+    @patch("accounts.views.send_mail")
+    @patch("accounts.views._verify_recaptcha", return_value=True)
+    def test_request_reset_for_deactivated_account_sends_no_email(self, mock_recaptcha, mock_send):
+        """Forgot password must not be a back door into a deleted account,
+        and must not reveal that the account exists — that's the restore
+        flow's job."""
+        self.user.mark_deleted()
+
+        resp = self.client.post(
+            reverse("password-reset-request"),
+            {
+                "email": "reset@example.com",
+            },
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("If an account", resp.data["message"])
+        mock_send.assert_not_called()
+
     def test_confirm_reset_with_valid_token_changes_password(self):
         uidb64, token = _make_token_link(self.user)
         resp = self.client.post(
@@ -390,11 +409,13 @@ class PasswordResetFlowTestCase(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("BrandNewPass123"))
+        self.assertTrue(self.user.is_active)
 
-    def test_confirm_reset_reactivates_deactivated_account(self):
-        """Флагуем как важное поведение: сброс пароля реактивирует soft-deleted юзера."""
+    def test_confirm_reset_for_deactivated_account_is_refused(self):
         self.user.mark_deleted()
+        old_password_hash = self.user.password
         uidb64, token = _make_token_link(self.user)
+
         resp = self.client.post(
             reverse("password-reset-confirm"),
             {
@@ -404,10 +425,13 @@ class PasswordResetFlowTestCase(TestCase):
                 "confirm_password": "BrandNewPass123",
             },
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data, {"detail": "Invalid or expired reset link."})
         self.user.refresh_from_db()
-        self.assertTrue(self.user.is_active)
-        self.assertIsNone(self.user.deleted_at)
+        self.assertFalse(self.user.is_active)
+        self.assertIsNotNone(self.user.deleted_at)
+        self.assertEqual(self.user.password, old_password_hash)
 
     def test_confirm_reset_invalid_token_rejected(self):
         uidb64, _ = _make_token_link(self.user)

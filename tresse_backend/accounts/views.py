@@ -226,7 +226,14 @@ class PasswordResetRequestAPIView(APIView):
             ua[:200],
         )
 
-        user = User.objects.filter(email__iexact=email).only("id", "email").first()
+        user = User.objects.filter(email__iexact=email).only("id", "email", "is_active").first()
+        if user and not user.is_active:
+            # A deactivated account can only come back through the restore
+            # flow, which enforces ACCOUNT_RESTORE_WINDOW_DAYS. Treat it the
+            # same as an unknown email so this endpoint can't be used to
+            # find out whether a deleted account exists.
+            user = None
+
         if user:
             token = default_token_generator.make_token(user)
             uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
@@ -273,17 +280,23 @@ class PasswordResetConfirmAPIView(APIView):
         except Exception:
             return Response(generic_err, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.filter(pk=uid).only("id", "password").first()
+        user = User.objects.filter(pk=uid).only("id", "password", "is_active").first()
         if not user:
             return Response(generic_err, status=status.HTTP_400_BAD_REQUEST)
 
         if not default_token_generator.check_token(user, token):
             return Response(generic_err, status=status.HTTP_400_BAD_REQUEST)
 
+        if not user.is_active:
+            # Password reset must never be a back door into a deactivated
+            # account — that's what the restore flow is for, and it
+            # enforces ACCOUNT_RESTORE_WINDOW_DAYS. Refuse the same way an
+            # invalid link would, so this doesn't confirm the account
+            # exists or reveal its deactivated state.
+            return Response(generic_err, status=status.HTTP_400_BAD_REQUEST)
+
         user.set_password(new_password)
-        user.is_active = True
-        user.deleted_at = None
-        user.save(update_fields=["password", "is_active", "deleted_at"])
+        user.save(update_fields=["password"])
 
         return Response(
             {"message": "Password has been reset successfully."},
