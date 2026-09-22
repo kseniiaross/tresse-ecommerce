@@ -81,7 +81,8 @@ function isSafeNextPath(p: string): boolean {
 }
 
 function ScrollToTop() {
-	const { hash } = useLocation();
+	const { pathname, search, hash } = useLocation();
+	const key = `${pathname}${search}`;
 
 	useLayoutEffect(() => {
 		if (hash) {
@@ -90,8 +91,9 @@ function ScrollToTop() {
 			return;
 		}
 
+		void key;
 		window.scrollTo(0, 0);
-	}, [hash]);
+	}, [key, hash]);
 
 	return null;
 }
@@ -258,7 +260,6 @@ export default function App() {
 								</PrivateRoute>
 							}
 						/>
-
 						<Route
 							path="/orders"
 							element={
@@ -267,9 +268,7 @@ export default function App() {
 								</PrivateRoute>
 							}
 						/>
-
 						<Route path="/order/success" element={<OrderSuccess />} />
-
 						<Route
 							path="/order"
 							element={
