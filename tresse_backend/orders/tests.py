@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.cache import cache
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.template.loader import render_to_string
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
@@ -1118,6 +1118,10 @@ class CancelOrderAPITestCase(OrderFixtureMixin, TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, "paid")
         self.assertEqual(order.stripe_refund_id, "")
+        # A failed Stripe call clears the "initiating" marker phase 1 set,
+        # so the customer can retry.
+        self.assertEqual(order.refund_status, "")
+        self.assertIsNone(order.refund_initiated_at)
 
     @patch("orders.views.stripe.Refund.create", return_value={"status": "pending"})
     def test_cancel_with_refund_response_missing_id_is_502(self, mock_refund):
@@ -1128,6 +1132,84 @@ class CancelOrderAPITestCase(OrderFixtureMixin, TestCase):
         self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
         order.refresh_from_db()
         self.assertEqual(order.status, "paid")
+        self.assertEqual(order.refund_status, "")
+        self.assertIsNone(order.refund_initiated_at)
+
+    @patch("orders.views.stripe.Refund.create")
+    def test_cancel_refused_when_refund_already_initiating(self, mock_refund):
+        order = self._make_order(refund_status="initiating", refund_initiated_at=timezone.now())
+
+        resp = self.client.post(self._url(order))
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_refund.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.status, "paid")
+        self.assertEqual(order.refund_status, "initiating")
+
+    @patch("orders.views.send_refund_initiated_email")
+    @patch("orders.views.send_order_canceled_email")
+    @patch("orders.views.stripe.Refund.create")
+    def test_cancel_stays_discoverable_when_recording_the_result_fails(
+        self, mock_refund, mock_canceled_email, mock_refund_email
+    ):
+        mock_refund.return_value = {"id": "re_cancel_recordfail", "status": "succeeded"}
+        order = self._make_order()
+        self._add_item(order)
+
+        # Simulate phase 3 (recording the already-issued refund) failing.
+        # Phase 1 also calls order.save(), but only with the "initiating"
+        # fields; phase 3's save is the one that includes "status", so only
+        # that call is made to fail.
+        original_save = Order.save
+
+        def flaky_save(self_order, *args, **kwargs):
+            update_fields = kwargs.get("update_fields") or (args[1] if len(args) > 1 else None)
+            if update_fields and "status" in update_fields:
+                raise RuntimeError("db exploded while recording the refund")
+            return original_save(self_order, *args, **kwargs)
+
+        with patch.object(Order, "save", flaky_save):
+            resp = self.client.post(self._url(order))
+
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        mock_canceled_email.assert_not_called()
+
+        order.refresh_from_db()
+        # The refund happened at Stripe (mock_refund was called), but
+        # recording it failed, so the order is left showing "initiating"
+        # rather than silently reverting to "no refund" — it stays
+        # discoverable by reconciling against Stripe.
+        mock_refund.assert_called_once()
+        self.assertEqual(order.status, "paid")
+        self.assertEqual(order.refund_status, "initiating")
+        self.assertEqual(order.stripe_refund_id, "")
+
+    @patch("orders.views.send_refund_initiated_email")
+    @patch("orders.views.send_order_canceled_email")
+    def test_cancel_calls_stripe_outside_the_views_own_atomic_block(
+        self, mock_canceled_email, mock_refund_email
+    ):
+        order = self._make_order()
+        self._add_item(order)
+
+        baseline_depth = len(connection.savepoint_ids)
+        observed_depth = {}
+
+        def fake_refund_create(**kwargs):
+            observed_depth["value"] = len(connection.savepoint_ids)
+            return {"id": "re_depth_check", "status": "pending"}
+
+        with patch("orders.views.stripe.Refund.create", side_effect=fake_refund_create):
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self.client.post(self._url(order))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # Phase 1's `transaction.atomic()` has already been left by the
+        # time Stripe is called, so the Stripe call runs at the same
+        # savepoint depth as before the request — not nested one deeper
+        # inside that transaction.
+        self.assertEqual(observed_depth["value"], baseline_depth)
         self.assertEqual(order.stripe_refund_id, "")
 
 
@@ -1459,3 +1541,88 @@ class OrderAdminReturnActionsTestCase(OrderFixtureMixin, TestCase):
         order.refresh_from_db()
         self.assertEqual(order.stripe_refund_id, "")
         self.assertEqual([lvl for lvl, _ in msgs], [messages.ERROR])
+
+    @patch("orders.admin.stripe.Refund.create", side_effect=stripe.error.StripeError("boom"))
+    def test_issue_stripe_refund_stripe_failure_clears_initiating_marker(self, mock_refund):
+        order = self._order_with_item(return_status="received")
+
+        msgs = self._run(self.admin.issue_stripe_refund, order)
+
+        mock_refund.assert_called_once()
+        self.assertEqual([lvl for lvl, _ in msgs], [messages.ERROR])
+        order.refresh_from_db()
+        self.assertEqual(order.return_status, "received")
+        self.assertEqual(order.refund_status, "")
+        self.assertIsNone(order.refund_initiated_at)
+
+    def test_issue_stripe_refund_skips_order_already_initiating(self):
+        order = self._order_with_item(
+            return_status="received",
+            refund_status="initiating",
+            refund_initiated_at=timezone.now(),
+        )
+
+        with patch("orders.admin.stripe.Refund.create") as mock_refund:
+            msgs = self._run(self.admin.issue_stripe_refund, order)
+
+        mock_refund.assert_not_called()
+        self.assertEqual(self._status_of(order), ["received"])
+        order.refresh_from_db()
+        self.assertEqual(order.refund_status, "initiating")
+        self.assertTrue(
+            any(lvl == messages.WARNING and "1 order(s) skipped" in m for lvl, m in msgs)
+        )
+
+    @patch("orders.admin.stripe.Refund.create")
+    def test_issue_stripe_refund_stays_discoverable_when_recording_the_result_fails(
+        self, mock_refund
+    ):
+        mock_refund.return_value = {"id": "re_admin_recordfail", "status": "succeeded"}
+        order = self._order_with_item(return_status="received")
+
+        # Simulate phase 3 (recording the already-issued refund) failing.
+        # Phase 1 also calls order.save(), but only with the "initiating"
+        # fields; phase 3's save is the one that includes "stripe_refund_id",
+        # so only that call is made to fail.
+        original_save = Order.save
+
+        def flaky_save(self_order, *args, **kwargs):
+            update_fields = kwargs.get("update_fields") or (args[1] if len(args) > 1 else None)
+            if update_fields and "stripe_refund_id" in update_fields:
+                raise RuntimeError("db exploded while recording the refund")
+            return original_save(self_order, *args, **kwargs)
+
+        with patch.object(Order, "save", flaky_save):
+            msgs = self._run(self.admin.issue_stripe_refund, order)
+
+        mock_refund.assert_called_once()
+        self.assertEqual([lvl for lvl, _ in msgs], [messages.ERROR])
+        self.assertIn("1 Stripe refund(s) failed.", msgs[0][1])
+
+        order.refresh_from_db()
+        # The refund happened at Stripe, but recording it failed, so the
+        # order is left showing "initiating" rather than silently reverting
+        # to "no refund" — it stays discoverable by reconciling against
+        # Stripe.
+        self.assertEqual(order.return_status, "received")
+        self.assertEqual(order.refund_status, "initiating")
+        self.assertEqual(order.stripe_refund_id, "")
+
+    def test_issue_stripe_refund_calls_stripe_outside_the_actions_own_atomic_block(self):
+        order = self._order_with_item(return_status="received")
+
+        baseline_depth = len(connection.savepoint_ids)
+        observed_depth = {}
+
+        def fake_refund_create(**kwargs):
+            observed_depth["value"] = len(connection.savepoint_ids)
+            return {"id": "re_admin_depth_check", "status": "pending"}
+
+        with patch("orders.admin.stripe.Refund.create", side_effect=fake_refund_create):
+            self._run(self.admin.issue_stripe_refund, order)
+
+        # Phase 1's `transaction.atomic()` has already been left by the
+        # time Stripe is called, so the Stripe call runs at the same
+        # savepoint depth as before the action ran — not nested one deeper
+        # inside that transaction.
+        self.assertEqual(observed_depth["value"], baseline_depth)

@@ -81,10 +81,31 @@ class MyOrdersAPIView(APIView):
         )
 
 
+def _clear_cancel_refund_initiating(order_id: int) -> None:
+    """Best-effort cleanup for when the Stripe call itself failed (nothing
+    was charged): undoes the "initiating" marker set in phase 1 so the
+    customer can retry. Never lets a DB error here mask the real error
+    response already decided by the caller."""
+    try:
+        Order.objects.filter(id=order_id, refund_status="initiating").update(
+            refund_status="",
+            refund_initiated_at=None,
+        )
+    except Exception:
+        logger.exception("cancel_order_clear_initiating_failed order_id=%s", order_id)
+
+
 class CancelOrderAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, order_id: int):
+        # -------------------------------------------------------------
+        # Phase 1: lock the order, check eligibility, and mark the refund
+        # "initiating" — all in one short transaction. The row is only
+        # held for this phase, not for the Stripe round-trip, and
+        # "initiating" itself blocks a concurrent request for the same
+        # order from starting a second refund.
+        # -------------------------------------------------------------
         try:
             with transaction.atomic():
                 order = (
@@ -127,29 +148,84 @@ class CancelOrderAPIView(APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-                refund = stripe.Refund.create(
-                    payment_intent=order.stripe_payment_intent,
-                    metadata={
-                        "order_id": str(order.id),
-                        "public_id": order.public_id or "",
-                        "user_id": str(request.user.id),
-                        "reason": "customer_cancellation",
-                    },
-                    idempotency_key=(f"cancel_order_{order.id}_{order.stripe_payment_intent}"),
+                if order.refund_status == "initiating":
+                    return Response(
+                        {"detail": "A refund is already being processed for this order."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                order.refund_status = "initiating"
+                order.refund_initiated_at = timezone.now()
+
+                order.save(
+                    update_fields=[
+                        "refund_status",
+                        "refund_initiated_at",
+                    ]
                 )
 
-                refund_id = _safe_str(refund.get("id"))
-                refund_status = _safe_str(refund.get("status"))
+        except Exception:
+            logger.exception("cancel_order_transaction_failed order_id=%s", order_id)
+            return Response(
+                {"detail": "Unable to cancel the order."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-                if not refund_id:
-                    return Response(
-                        {"detail": "Refund response was invalid."},
-                        status=status.HTTP_502_BAD_GATEWAY,
-                    )
+        # -------------------------------------------------------------
+        # Phase 2: call Stripe with no transaction open, so the order row
+        # is never locked for the network round-trip.
+        # -------------------------------------------------------------
+        try:
+            refund = stripe.Refund.create(
+                payment_intent=order.stripe_payment_intent,
+                metadata={
+                    "order_id": str(order.id),
+                    "public_id": order.public_id or "",
+                    "user_id": str(request.user.id),
+                    "reason": "customer_cancellation",
+                },
+                idempotency_key=(f"cancel_order_{order.id}_{order.stripe_payment_intent}"),
+            )
+
+        except stripe.error.StripeError:
+            logger.exception("stripe_cancel_refund_failed order_id=%s", order_id)
+            _clear_cancel_refund_initiating(order.id)
+            return Response(
+                {"detail": "Refund could not be initiated. Please try again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        except Exception:
+            logger.exception("cancel_order_transaction_failed order_id=%s", order_id)
+            _clear_cancel_refund_initiating(order.id)
+            return Response(
+                {"detail": "Unable to cancel the order."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        refund_id = _safe_str(refund.get("id"))
+        refund_status_value = _safe_str(refund.get("status"))
+
+        if not refund_id:
+            _clear_cancel_refund_initiating(order.id)
+            return Response(
+                {"detail": "Refund response was invalid."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # -------------------------------------------------------------
+        # Phase 3: record the result in a new transaction. If this fails,
+        # the order is left showing refund_status "initiating" instead of
+        # silently losing track of a refund Stripe already issued — it
+        # stays discoverable by reconciling against Stripe.
+        # -------------------------------------------------------------
+        try:
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(pk=order.pk)
 
                 order.status = "canceled"
                 order.stripe_refund_id = refund_id
-                order.refund_status = refund_status
+                order.refund_status = refund_status_value
                 order.refund_initiated_at = timezone.now()
 
                 order.save(
@@ -169,13 +245,6 @@ class CancelOrderAPIView(APIView):
                 )
 
                 transaction.on_commit(lambda: send_refund_initiated_email(order=order))
-
-        except stripe.error.StripeError:
-            logger.exception("stripe_cancel_refund_failed order_id=%s", order_id)
-            return Response(
-                {"detail": "Refund could not be initiated. Please try again."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         except Exception:
             logger.exception("cancel_order_transaction_failed order_id=%s", order_id)

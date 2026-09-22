@@ -472,6 +472,21 @@ class OrderAdmin(admin.ModelAdmin):
                 level=messages.WARNING,
             )
 
+    def _clear_return_refund_initiating(self, order_id):
+        """Best-effort cleanup for when the Stripe call itself failed
+        (nothing was charged): undoes the "initiating" marker set in phase
+        1 so the order can be retried on the next run of this action."""
+        try:
+            Order.objects.filter(id=order_id, refund_status="initiating").update(
+                refund_status="",
+                refund_initiated_at=None,
+            )
+        except Exception:
+            logger.exception(
+                "admin_return_refund_clear_initiating_failed order_id=%s",
+                order_id,
+            )
+
     @admin.action(description=("Issue Stripe refund for selected received returns"))
     def issue_stripe_refund(
         self,
@@ -483,6 +498,12 @@ class OrderAdmin(admin.ModelAdmin):
         failed = 0
 
         for selected_order in queryset:
+            # -----------------------------------------------------------
+            # Phase 1: lock the order, check eligibility, and mark the
+            # refund "initiating" — all in one short transaction. Only
+            # this phase holds the row locked; "initiating" itself blocks
+            # a concurrent run of this action from double-refunding it.
+            # -----------------------------------------------------------
             try:
                 with transaction.atomic():
                     order = Order.objects.select_for_update().get(pk=selected_order.pk)
@@ -518,25 +539,88 @@ class OrderAdmin(admin.ModelAdmin):
                         skipped += 1
                         continue
 
-                    idempotency_key = f"return_refund_{order.id}_{order.stripe_payment_intent}"
+                    if order.refund_status == "initiating":
+                        skipped += 1
+                        continue
 
-                    refund = stripe.Refund.create(
-                        payment_intent=(order.stripe_payment_intent),
-                        metadata={
-                            "order_id": str(order.id),
-                            "public_id": (order.public_id or ""),
-                            "user_id": str(order.user_id),
-                            "reason": ("approved_customer_return"),
-                        },
-                        idempotency_key=(idempotency_key),
+                    order.refund_status = "initiating"
+                    order.refund_initiated_at = timezone.now()
+
+                    order.save(
+                        update_fields=[
+                            "refund_status",
+                            "refund_initiated_at",
+                        ]
                     )
 
-                    refund_id = str(refund.get("id") or "").strip()
+            except Exception:
+                failed += 1
 
-                    refund_status = str(refund.get("status") or "").strip()
+                logger.exception(
+                    "admin_return_refund_unexpected order_id=%s",
+                    selected_order.id,
+                )
 
-                    if not refund_id:
-                        raise ValueError("Stripe refund response did not contain an id")
+                continue
+
+            # Every ineligible/skip branch above `continue`d already, so
+            # reaching here means this order is now marked "initiating".
+
+            # -----------------------------------------------------------
+            # Phase 2: call Stripe with no transaction open.
+            # -----------------------------------------------------------
+            idempotency_key = f"return_refund_{order.id}_{order.stripe_payment_intent}"
+
+            try:
+                refund = stripe.Refund.create(
+                    payment_intent=(order.stripe_payment_intent),
+                    metadata={
+                        "order_id": str(order.id),
+                        "public_id": (order.public_id or ""),
+                        "user_id": str(order.user_id),
+                        "reason": ("approved_customer_return"),
+                    },
+                    idempotency_key=(idempotency_key),
+                )
+
+                refund_id = str(refund.get("id") or "").strip()
+
+                refund_status = str(refund.get("status") or "").strip()
+
+                if not refund_id:
+                    raise ValueError("Stripe refund response did not contain an id")
+
+            except stripe.error.StripeError:
+                failed += 1
+
+                logger.exception(
+                    "admin_return_refund_failed order_id=%s",
+                    order.id,
+                )
+
+                self._clear_return_refund_initiating(order.id)
+                continue
+
+            except Exception:
+                failed += 1
+
+                logger.exception(
+                    "admin_return_refund_unexpected order_id=%s",
+                    order.id,
+                )
+
+                self._clear_return_refund_initiating(order.id)
+                continue
+
+            # -----------------------------------------------------------
+            # Phase 3: record the result in a new transaction. If this
+            # fails, the order is left showing refund_status "initiating"
+            # instead of silently losing track of a refund Stripe already
+            # issued — it stays discoverable by reconciling against Stripe.
+            # -----------------------------------------------------------
+            try:
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=order.pk)
 
                     now = timezone.now()
 
@@ -571,22 +655,14 @@ class OrderAdmin(admin.ModelAdmin):
 
                     order.save(update_fields=(update_fields))
 
-                    initiated += 1
-
-            except stripe.error.StripeError:
-                failed += 1
-
-                logger.exception(
-                    "admin_return_refund_failed order_id=%s",
-                    selected_order.id,
-                )
+                initiated += 1
 
             except Exception:
                 failed += 1
 
                 logger.exception(
-                    "admin_return_refund_unexpected order_id=%s",
-                    selected_order.id,
+                    "admin_return_refund_record_failed order_id=%s",
+                    order.id,
                 )
 
         if initiated:
