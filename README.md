@@ -135,7 +135,7 @@ Testing here isn't a checkbox — it's how several real bugs in this codebase we
 |---|---|---|---|
 | **Backend** | pytest | 191 tests — auth & account lifecycle, orders, Stripe checkout/webhook/refunds, cart & inventory, catalog, newsletter, email templates | ✅ passing |
 | **Frontend (unit/integration)** | Vitest + Testing Library | 264 tests — Redux slices, API error handling, hooks, every major page and form | ✅ passing |
-| **Frontend (stress test)** | Playwright | 150 seeded randomized actions — clicks, garbage input, navigation, modal toggling | ⚠️ see note below |
+| **Frontend (stress test)** | Playwright | 150 seeded randomized actions — clicks, garbage input, navigation, modal toggling; fails on any unhandled page error or 5xx response | ✅ passing |
 | **Type checking** | `tsc --noEmit` | Whole frontend | ✅ 0 errors |
 | **Lint / format** | Ruff · Biome (incl. a11y) | Whole backend and frontend | ✅ 0 errors |
 
@@ -149,7 +149,7 @@ Testing here isn't a checkbox — it's how several real bugs in this codebase we
 - **Consent gating:** the tracking helpers no-op without consent, each vendor script is injected at most once with it, and consent withdrawal calls the vendor revoke APIs.
 - **Every major page:** catalog, product detail, cart, checkout, order history, wishlist, dashboard — rendered, interacted with, and asserted against real component markup.
 
-> **Note on the stress test:** the Playwright monkey script runs and is reproducible with `npm run test:monkey`, and its first run surfaced a real defect — the cookie settings modal swallowed clicks and could not be dismissed from the keyboard, which has since been fixed. Its final assertion is currently a placeholder and its last full run was made against the deployed API rather than a local one, so it is best described as an exploration tool at this point, not a pass/fail gate. Tightening it is tracked in the audit notes.
+> **The stress test** is seeded and reproducible with `npm run test:monkey`. It walks the app with 150 random actions — clicks, navigation, and deliberately malformed form input such as extreme-length numbers, null bytes and control characters — and fails on any unhandled page error or 5xx response. A preflight check aborts immediately if the local API isn't reachable, so a broken environment can't masquerade as a passing run, and Playwright traces are captured on retry. Its first run surfaced a modal that swallowed clicks and couldn't be dismissed from the keyboard; its most recent run surfaced a 500 on the catalog endpoint caused by an unguarded image URL — both since fixed.
 
 ### Bugs found and fixed through testing
 
@@ -157,8 +157,8 @@ A few examples from [`docs/fixes-2026-09.md`](./tresse_backend/docs/fixes-2026-0
 
 - **Back-in-stock notifications were connected to nothing.** The `post_save` receiver existed and had tests, but `ProductsConfig.ready()` was empty, so the decorator never ran and no email was ever sent. The tests passed only because `mock.patch` imported the module as a side effect. Worse, the handler's only guard was `quantity > 0` — connecting it as-is would have emailed every waiting subscriber each time stock was *decremented* after a purchase. Fixed together: wired up in `ready()`, guarded to fire only on a zero-to-positive transition, and moved into `transaction.on_commit`.
 - **Profile updates silently did nothing.** The serializer declared camelCase fields while the frontend sent snake_case; DRF dropped the unknown keys, the API returned `200`, and the UI showed "Saved." Name, address line and postal code never reached the database — masked by a localStorage copy that made it look like it had worked. Reproduced with a test using the exact payload the form sends, then fixed.
+- **A 500 on the whole catalog, caused by one image.** `get_image_url` called `.url` on a file field with no guard, unlike the main-image helper sitting right next to it. Any storage hiccup took the entire catalog response down instead of dropping a single picture. Found by the stress test, not by a human clicking around.
 - **Sessions died 30 minutes after login, mid-checkout.** The backend rotates and blacklists refresh tokens; the frontend read only `access` from the refresh response and kept sending the blacklisted refresh token, so the second refresh always failed.
-- **A focus-management race condition silently truncated user input** in modal forms. Every parent re-render handed the dialog a fresh close-handler reference, re-triggering a focus effect that yanked focus back after each keystroke. Fixed by holding the handler behind a ref, and generalized into the shared dialog hook now used by every modal.
 
 ---
 
@@ -166,12 +166,23 @@ A few examples from [`docs/fixes-2026-09.md`](./tresse_backend/docs/fixes-2026-0
 
 In September 2026 the codebase was put through a full pre-launch audit — every backend app, frontend component, config file, email template and test read end to end — producing **81 findings** ranked P0 to P3.
 
-All P0 (release blockers) and all but one P1 are now closed, each as its own commit with tests and a written entry explaining what broke, why it mattered, and how it was verified:
+Every P0 and P1 is now closed, each as its own commit with tests and a written entry explaining what broke, why it mattered, and how it was verified:
 
 - [`tresse_backend/docs/fixes-2026-09.md`](./tresse_backend/docs/fixes-2026-09.md)
 - [`tresse_frontend/docs/fixes-2026-09.md`](./tresse_frontend/docs/fixes-2026-09.md)
 
 Not every finding survived contact with the code. Three were withdrawn after reading further — a suspected lost surcharge turned out to be correctly snapshotted server-side, and a flagged config "typo" turned out to be valid syntax. Those reversals are documented too.
+
+### How the work was done
+
+The audit and the fixes were done with AI assistance — Claude for the codebase review, Claude Code for the implementation — under a process designed to keep the output verifiable:
+
+- **One task, one prompt, one commit.** Every prompt fixed the scope, named the files, and listed the acceptance checks (pytest / Vitest, `tsc --noEmit`, Ruff, Biome). Every task ends with a written entry in the fix log.
+- **Tests had to fail first.** A fix was accepted only once its test was shown to fail against the pre-fix code. For anything touching money the standing instruction was: *if a test exposes a real bug, stop and report it instead of fixing it* — so tests could never be bent to match the code.
+- **Every diff was reviewed before it was committed,** and out-of-scope changes were rejected. One suggested tooling change made the linter start rewriting files in `dist/`; it was caught in review and reverted.
+- **Manual verification for what tests can't prove:** pixel requests in the browser Network tab, the production admin, real email delivery, the live Stripe dashboard.
+- **Three audit findings were withdrawn** after reading further. Verifying the report mattered as much as acting on it.
+- **Product and policy decisions stayed human:** the 30-day restore window, US-only shipping, free domestic delivery priced into the garment, 2FA on the admin but not on customer accounts.
 
 ---
 
@@ -210,7 +221,7 @@ cd tresse_frontend
 npm run test:run        # unit/integration tests
 npx tsc --noEmit        # type check
 npm run lint            # Biome, including accessibility rules
-npm run test:monkey     # randomized stress test
+npm run test:monkey     # randomized stress test (needs the backend running)
 ```
 
 ---
