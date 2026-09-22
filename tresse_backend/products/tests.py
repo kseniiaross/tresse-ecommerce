@@ -1,7 +1,8 @@
 # tresse_backend/products/tests.py
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
+from django.db.models.fields.files import FieldFile
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -14,10 +15,16 @@ from products.models import (
     CartItem,
     Category,
     Product,
+    ProductImage,
     ProductSize,
     ProductWishlist,
     Size,
     StockSubscription,
+)
+from products.serializers import (
+    ProductColorVariantSerializer,
+    ProductImageSerializer,
+    ProductSerializer,
 )
 from testing_helpers import make_user
 
@@ -387,6 +394,61 @@ class ProductListAPITestCase(TestCase):
         resp = self.client.get(reverse("product-list"), {"search": "Visible"})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["results"]), 1)
+
+
+# ============================================================
+# Serializers degrade instead of 500ing on a broken image .url
+# ============================================================
+class ImageUrlFailureTestCase(TestCase):
+    """A missing storage configuration, an unreachable backend, or a broken
+    row can make FieldFile.url raise. Each of these three serializer
+    methods must return None for that one field instead of taking the
+    whole catalog response down with it."""
+
+    def setUp(self):
+        self.product = _make_product(color_swatch_image="product_swatches/fake.jpg")
+        self.image = ProductImage.objects.create(
+            product=self.product,
+            image="products/fake.jpg",
+            sort_order=0,
+        )
+
+    def _broken_url(self):
+        return patch.object(
+            FieldFile,
+            "url",
+            new_callable=PropertyMock,
+            side_effect=ValueError("storage backend unreachable"),
+        )
+
+    def test_product_image_serializer_returns_none_when_url_raises(self):
+        with self._broken_url():
+            data = ProductImageSerializer(self.image, context={}).data
+
+        self.assertIsNone(data["image_url"])
+        self.assertEqual(data["id"], self.image.id)
+        self.assertEqual(data["sort_order"], 0)
+
+    def test_product_serializer_color_swatch_returns_none_when_url_raises(self):
+        with self._broken_url():
+            data = ProductSerializer(self.product, context={}).data
+
+        self.assertIsNone(data["color_swatch_url"])
+        # The rest of the payload is intact, including the nested images
+        # list, whose own image_url also degrades to None rather than
+        # raising and failing the whole product.
+        self.assertEqual(data["name"], self.product.name)
+        self.assertEqual(data["id"], self.product.id)
+        self.assertEqual(len(data["images"]), 1)
+        self.assertIsNone(data["images"][0]["image_url"])
+
+    def test_product_color_variant_serializer_color_swatch_returns_none_when_url_raises(self):
+        with self._broken_url():
+            data = ProductColorVariantSerializer(self.product, context={}).data
+
+        self.assertIsNone(data["color_swatch_url"])
+        self.assertEqual(data["name"], self.product.name)
+        self.assertEqual(data["id"], self.product.id)
 
 
 class StockSignalTestCase(TestCase):

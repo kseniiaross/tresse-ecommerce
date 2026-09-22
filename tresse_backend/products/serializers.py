@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import (
     urlparse,
     urlunparse,
@@ -21,6 +22,8 @@ from .models import (
     ProductWishlist,
     Size,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def force_https(
@@ -122,10 +125,17 @@ class ProductImageSerializer(
             "request",
         )
 
-        return build_abs_https(
-            request,
-            obj.image.url,
-        )
+        try:
+            return build_abs_https(
+                request,
+                obj.image.url,
+            )
+        except Exception:
+            logger.exception(
+                "product_image_url_failed product_image_id=%s",
+                obj.id,
+            )
+            return None
 
 
 class CategorySerializer(
@@ -273,10 +283,17 @@ class ProductColorVariantSerializer(
             "request",
         )
 
-        return build_abs_https(
-            request,
-            obj.color_swatch_image.url,
-        )
+        try:
+            return build_abs_https(
+                request,
+                obj.color_swatch_image.url,
+            )
+        except Exception:
+            logger.exception(
+                "product_color_swatch_url_failed product_id=%s",
+                obj.id,
+            )
+            return None
 
 
 class ProductSerializer(
@@ -375,10 +392,17 @@ class ProductSerializer(
             "request",
         )
 
-        return build_abs_https(
-            request,
-            obj.color_swatch_image.url,
-        )
+        try:
+            return build_abs_https(
+                request,
+                obj.color_swatch_image.url,
+            )
+        except Exception:
+            logger.exception(
+                "product_color_swatch_url_failed product_id=%s",
+                obj.id,
+            )
+            return None
 
     def get_variants(
         self,
