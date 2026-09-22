@@ -1,0 +1,14 @@
+Payment Refunded
+
+Hi there,
+
+An item in your order sold out in the moments between checkout and payment, so we were not able to create your order.
+
+Your payment of ${{ amount }} has been refunded in full. Depending on your bank, it may take a few business days to appear.
+
+We're sorry for the inconvenience — please feel free to shop again.
+
+Need help?
+Reply to this email or contact us at {{ support_email }}.
+
+— TRESSE

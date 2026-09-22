@@ -20,7 +20,11 @@ from rest_framework.response import Response
 
 from products.models import Cart, CartItem
 
-from .emails import send_order_confirmation_email
+from .emails import (
+    send_checkout_stock_sold_out_email,
+    send_checkout_webhook_alert,
+    send_order_confirmation_email,
+)
 from .models import Order, OrderItem
 
 logger = logging.getLogger(__name__)
@@ -110,6 +114,17 @@ def _cents_to_money(
     cents: int,
 ) -> Decimal:
     return (Decimal(cents) / Decimal("100")).quantize(Decimal("0.01"))
+
+
+def _session_amount_and_email(
+    session: dict,
+) -> tuple[Decimal, str]:
+    """Best-effort amount/customer email for an alert, read straight off the
+    raw Stripe session — used by branches that bail out before the order's
+    own amount fields are parsed."""
+    amount = _cents_to_money(int(session.get("amount_total") or 0))
+    customer_email = (session.get("customer_details") or {}).get("email") or ""
+    return amount, customer_email
 
 
 def _item_unit_price(
@@ -599,6 +614,59 @@ def create_checkout_session(
         )
 
 
+def _refund_stock_sold_out_checkout(
+    *,
+    payment_intent_id: str,
+    session_id: str,
+    email: str,
+    total_amount: Decimal,
+) -> None:
+    """Refunds a checkout abandoned for insufficient stock and lets the
+    customer know. Called after the order-creation transaction has been
+    left, so the refund is never issued from inside an open transaction.
+    Logs and swallows its own failures — the webhook always returns 200."""
+
+    try:
+        stripe.Refund.create(
+            payment_intent=payment_intent_id,
+            metadata={
+                "session_id": session_id or "",
+                "reason": "checkout_stock_insufficient",
+            },
+            idempotency_key=(f"stock_sold_out_refund_{payment_intent_id}"),
+        )
+
+    except stripe.error.StripeError:
+        logger.exception(
+            "checkout_stock_insufficient_refund_failed payment_intent_id=%s session_id=%s",
+            payment_intent_id,
+            session_id,
+        )
+        return
+
+    except Exception:
+        logger.exception(
+            "checkout_stock_insufficient_refund_unexpected payment_intent_id=%s session_id=%s",
+            payment_intent_id,
+            session_id,
+        )
+        return
+
+    try:
+        send_checkout_stock_sold_out_email(
+            to_email=email,
+            amount=total_amount,
+            session_id=session_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "checkout_stock_insufficient_email_failed payment_intent_id=%s session_id=%s",
+            payment_intent_id,
+            session_id,
+        )
+
+
 @csrf_exempt
 @api_view(["POST"])
 @permission_classes([permissions.AllowAny])
@@ -717,6 +785,16 @@ def stripe_webhook(
             session_id,
         )
 
+        amount, customer_email = _session_amount_and_email(session)
+
+        send_checkout_webhook_alert(
+            reason="missing_metadata",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id or "",
+            amount=amount,
+            customer_email=customer_email,
+        )
+
         return Response(
             {"ok": True},
             status=(status.HTTP_200_OK),
@@ -734,6 +812,16 @@ def stripe_webhook(
             "checkout_user_not_found user_id=%s session_id=%s",
             user_id,
             session_id,
+        )
+
+        amount, customer_email = _session_amount_and_email(session)
+
+        send_checkout_webhook_alert(
+            reason="user_not_found",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            amount=amount,
+            customer_email=customer_email,
         )
 
         return Response(
@@ -757,6 +845,16 @@ def stripe_webhook(
             user_id,
         )
 
+        amount, customer_email = _session_amount_and_email(session)
+
+        send_checkout_webhook_alert(
+            reason="cart_not_found",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            amount=amount,
+            customer_email=customer_email,
+        )
+
         return Response(
             {"ok": True},
             status=(status.HTTP_200_OK),
@@ -770,6 +868,33 @@ def stripe_webhook(
     )
 
     if not cart_items:
+        # A legitimate retry of an already-processed event also lands here,
+        # because the cart's items were deleted once that order was created.
+        # Only alert when there is no order for this payment intent yet —
+        # a duplicate delivery of a successful checkout stays silent.
+        already_processed = Order.objects.filter(
+            user=user,
+            stripe_payment_intent=payment_intent_id,
+        ).exists()
+
+        if not already_processed:
+            logger.error(
+                "checkout_cart_empty cart_id=%s user_id=%s session_id=%s",
+                cart_id,
+                user_id,
+                session_id,
+            )
+
+            amount, customer_email = _session_amount_and_email(session)
+
+            send_checkout_webhook_alert(
+                reason="empty_cart",
+                session_id=session_id,
+                payment_intent_id=payment_intent_id,
+                amount=amount,
+                customer_email=customer_email,
+            )
+
         return Response(
             {"ok": True},
             status=(status.HTTP_200_OK),
@@ -790,6 +915,16 @@ def stripe_webhook(
             user_id,
         )
 
+        amount, customer_email = _session_amount_and_email(session)
+
+        send_checkout_webhook_alert(
+            reason="policy_consent_missing",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            amount=amount,
+            customer_email=customer_email,
+        )
+
         return Response(
             {"ok": True},
             status=(status.HTTP_200_OK),
@@ -800,6 +935,16 @@ def stripe_webhook(
             "checkout_custom_ack_missing session_id=%s user_id=%s",
             session_id,
             user_id,
+        )
+
+        amount, customer_email = _session_amount_and_email(session)
+
+        send_checkout_webhook_alert(
+            reason="custom_ack_missing",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            amount=amount,
+            customer_email=customer_email,
         )
 
         return Response(
@@ -819,6 +964,16 @@ def stripe_webhook(
             cart_id,
             expected_cart_sig,
             current_cart_sig,
+        )
+
+        amount, customer_email = _session_amount_and_email(session)
+
+        send_checkout_webhook_alert(
+            reason="cart_signature_mismatch",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            amount=amount,
+            customer_email=customer_email,
         )
 
         return Response(
@@ -898,6 +1053,13 @@ def stripe_webhook(
     # CREATE ORDER
     # -------------------------------------------------------------------------
 
+    # `stock_shortage` is set instead of returning from inside the atomic
+    # block below, so the refund can be issued only after that transaction
+    # has been left — nothing was written for this order, so there is
+    # nothing to roll back, but the refund call itself must not be able to
+    # get wrapped up in an open transaction.
+    stock_shortage = None
+
     try:
         with transaction.atomic():
             locked_items = []
@@ -910,17 +1072,12 @@ def stripe_webhook(
                 )
 
                 if locked_product_size.quantity < cart_item.quantity:
-                    logger.error(
-                        "checkout_stock_insufficient product_size_id=%s requested=%s available=%s",
-                        locked_product_size.id,
-                        cart_item.quantity,
-                        locked_product_size.quantity,
-                    )
-
-                    return Response(
-                        {"ok": True},
-                        status=(status.HTTP_200_OK),
-                    )
+                    stock_shortage = {
+                        "product_size_id": locked_product_size.id,
+                        "requested": cart_item.quantity,
+                        "available": locked_product_size.quantity,
+                    }
+                    break
 
                 locked_items.append(
                     (
@@ -929,103 +1086,104 @@ def stripe_webhook(
                     )
                 )
 
-            order = Order.objects.create(
-                user=user,
-                email=email,
-                full_name=full_name,
-                address=address,
-                city=city,
-                state=state_value,
-                postal_code=postal_code,
-                country=country,
-                payment_method="card",
-                currency="usd",
-                status="paid",
-                subtotal_amount=(subtotal_amount),
-                discount_code=(
-                    metadata.get(
-                        "welcome_code",
+            if stock_shortage is None:
+                order = Order.objects.create(
+                    user=user,
+                    email=email,
+                    full_name=full_name,
+                    address=address,
+                    city=city,
+                    state=state_value,
+                    postal_code=postal_code,
+                    country=country,
+                    payment_method="card",
+                    currency="usd",
+                    status="paid",
+                    subtotal_amount=(subtotal_amount),
+                    discount_code=(
+                        metadata.get(
+                            "welcome_code",
+                            "",
+                        )
+                    ),
+                    discount_amount=(discount_amount),
+                    tax_amount=(tax_amount),
+                    total_amount=(total_amount),
+                    stripe_checkout_id=(session_id),
+                    stripe_payment_intent=(payment_intent_id),
+                    card_brand=(card_brand),
+                    card_last4=(card_last4),
+                    policy_accepted=(policy_accepted),
+                    policy_version=(policy_version),
+                    policy_accepted_at=(timezone.now()),
+                    custom_size_final_sale_acknowledged=(custom_size_final_sale_acknowledged),
+                )
+
+                for (
+                    cart_item,
+                    product_size,
+                ) in locked_items:
+                    product = product_size.product
+
+                    size_name = getattr(
+                        product_size.size,
+                        "name",
                         "",
                     )
-                ),
-                discount_amount=(discount_amount),
-                tax_amount=(tax_amount),
-                total_amount=(total_amount),
-                stripe_checkout_id=(session_id),
-                stripe_payment_intent=(payment_intent_id),
-                card_brand=(card_brand),
-                card_last4=(card_last4),
-                policy_accepted=(policy_accepted),
-                policy_version=(policy_version),
-                policy_accepted_at=(timezone.now()),
-                custom_size_final_sale_acknowledged=(custom_size_final_sale_acknowledged),
-            )
 
-            for (
-                cart_item,
-                product_size,
-            ) in locked_items:
-                product = product_size.product
+                    unit_price = _item_unit_price(cart_item)
 
-                size_name = getattr(
-                    product_size.size,
-                    "name",
-                    "",
-                )
+                    OrderItem.objects.create(
+                        order=order,
+                        product=product,
+                        product_size=(product_size),
+                        size=(size_name),
+                        quantity=(cart_item.quantity),
+                        unit_price=(unit_price),
+                        return_policy=(product.return_policy),
+                        custom_bust=(cart_item.custom_bust),
+                        custom_underbust=(cart_item.custom_underbust),
+                        custom_waist=(cart_item.custom_waist),
+                        custom_hips=(cart_item.custom_hips),
+                        custom_height=(cart_item.custom_height),
+                        custom_cup=(cart_item.custom_cup),
+                        custom_fit_notes=(cart_item.custom_fit_notes),
+                        custom_length_selected=(cart_item.custom_length_selected),
+                        custom_length_cm=(cart_item.custom_length_cm),
+                        custom_length_surcharge=(cart_item.custom_length_surcharge),
+                    )
 
-                unit_price = _item_unit_price(cart_item)
+                    product_size.quantity -= cart_item.quantity
 
-                OrderItem.objects.create(
-                    order=order,
-                    product=product,
-                    product_size=(product_size),
-                    size=(size_name),
-                    quantity=(cart_item.quantity),
-                    unit_price=(unit_price),
-                    return_policy=(product.return_policy),
-                    custom_bust=(cart_item.custom_bust),
-                    custom_underbust=(cart_item.custom_underbust),
-                    custom_waist=(cart_item.custom_waist),
-                    custom_hips=(cart_item.custom_hips),
-                    custom_height=(cart_item.custom_height),
-                    custom_cup=(cart_item.custom_cup),
-                    custom_fit_notes=(cart_item.custom_fit_notes),
-                    custom_length_selected=(cart_item.custom_length_selected),
-                    custom_length_cm=(cart_item.custom_length_cm),
-                    custom_length_surcharge=(cart_item.custom_length_surcharge),
-                )
+                    product_size.save(update_fields=["quantity"])
 
-                product_size.quantity -= cart_item.quantity
+                CartItem.objects.filter(cart=cart).delete()
 
-                product_size.save(update_fields=["quantity"])
-
-            CartItem.objects.filter(cart=cart).delete()
-
-            def _send_email_after_commit(
-                order_id: int,
-            ) -> None:
-                try:
-                    fresh = (
-                        Order.objects.select_related("user")
-                        .prefetch_related(
-                            "items",
-                            "items__product",
+                def _send_email_after_commit(
+                    order_id: int,
+                ) -> None:
+                    try:
+                        fresh = (
+                            Order.objects.select_related("user")
+                            .prefetch_related(
+                                "items",
+                                "items__product",
+                            )
+                            .get(id=order_id)
                         )
-                        .get(id=order_id)
-                    )
 
-                    send_order_confirmation_email(
-                        order=fresh,
-                        items=(_build_items_payload(fresh)),
-                    )
+                        send_order_confirmation_email(
+                            order=fresh,
+                            items=(_build_items_payload(fresh)),
+                        )
 
-                except Exception:
-                    logger.exception(
-                        "order_confirmation_email_failed order_id=%s",
-                        order_id,
-                    )
+                    except Exception:
+                        logger.exception(
+                            "order_confirmation_email_failed order_id=%s",
+                            order_id,
+                        )
 
-            transaction.on_commit(lambda: _send_email_after_commit(order.id))
+                transaction.on_commit(lambda: _send_email_after_commit(order.id))
 
     except Exception:
         logger.exception(
@@ -1037,6 +1195,34 @@ def stripe_webhook(
         return Response(
             {"detail": ("Order creation failed")},
             status=(status.HTTP_500_INTERNAL_SERVER_ERROR),
+        )
+
+    if stock_shortage is not None:
+        logger.error(
+            "checkout_stock_insufficient product_size_id=%s requested=%s available=%s",
+            stock_shortage["product_size_id"],
+            stock_shortage["requested"],
+            stock_shortage["available"],
+        )
+
+        send_checkout_webhook_alert(
+            reason="stock_insufficient",
+            session_id=session_id,
+            payment_intent_id=payment_intent_id,
+            amount=total_amount,
+            customer_email=email,
+        )
+
+        _refund_stock_sold_out_checkout(
+            payment_intent_id=payment_intent_id,
+            session_id=session_id,
+            email=email,
+            total_amount=total_amount,
+        )
+
+        return Response(
+            {"ok": True},
+            status=(status.HTTP_200_OK),
         )
 
     return Response(

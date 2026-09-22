@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import logging
+from decimal import Decimal
 from typing import Any
 
+import sentry_sdk
 from django.conf import settings
 from django.core.mail import EmailMessage
 from django.template.loader import render_to_string
+
+logger = logging.getLogger(__name__)
 
 TPL_ORDER_CONFIRMATION = "emails/orders/order_confirmation.txt"
 TPL_ORDER_CANCELED = "emails/orders/order_canceled.txt"
 TPL_REFUND_INITIATED = "emails/orders/refund_initiated.txt"
 TPL_SHIPPING_CONFIRMATION = "emails/orders/shipping_confirmation.txt"
 TPL_DELIVERED = "emails/orders/delivered.txt"
+TPL_CHECKOUT_STOCK_SOLD_OUT = "emails/orders/checkout_stock_sold_out.txt"
 
 
 def _from_email() -> str:
@@ -122,3 +128,74 @@ def send_delivered_email(*, order) -> None:
         template=TPL_DELIVERED,
         context={"order": order, **_support_context()},
     )
+
+
+def send_checkout_stock_sold_out_email(
+    *, to_email: str, amount: Decimal, session_id: str = ""
+) -> None:
+    """Told to the customer when Stripe captured their payment but an item
+    they were buying sold out before the order could be created, so the
+    charge was refunded in full."""
+    to_email = (to_email or "").strip()
+    if not to_email:
+        return
+
+    _send_txt_email(
+        subject="TRESSE — Your payment was refunded",
+        to_email=to_email,
+        template=TPL_CHECKOUT_STOCK_SOLD_OUT,
+        context={"amount": amount, "session_id": session_id, **_support_context()},
+    )
+
+
+def send_checkout_webhook_alert(
+    *,
+    reason: str,
+    session_id: str = "",
+    payment_intent_id: str = "",
+    amount: Decimal | None = None,
+    customer_email: str = "",
+) -> None:
+    """Tells support and Sentry that a Stripe checkout webhook hit a branch
+    where the customer's payment may have been captured but no order could
+    be created (or, for a stock shortage, was deliberately abandoned).
+
+    Must never raise and must never affect the webhook's response — every
+    failure here is logged and swallowed.
+    """
+    try:
+        sentry_sdk.capture_message(
+            f"checkout_webhook_alert reason={reason} session_id={session_id or ''}",
+            level="error",
+            fingerprint=["checkout-webhook-alert", reason],
+        )
+    except Exception:
+        logger.exception("checkout_webhook_alert_sentry_failed reason=%s", reason)
+
+    support_email = (getattr(settings, "SUPPORT_EMAIL", "") or "").strip()
+    if not support_email:
+        return
+
+    try:
+        body = "\n".join(
+            [
+                "A Stripe checkout webhook hit a branch where the customer's "
+                "payment may have been captured but no order was created.",
+                "",
+                f"Reason: {reason}",
+                f"Checkout session id: {session_id or ''}",
+                f"Payment intent id: {payment_intent_id or ''}",
+                f"Amount: {amount if amount is not None else ''}",
+                f"Customer email: {customer_email or ''}",
+            ]
+        )
+
+        msg = EmailMessage(
+            subject=f"[TRESSE] Checkout webhook alert: {reason}",
+            body=body,
+            from_email=_from_email(),
+            to=[support_email],
+        )
+        msg.send(fail_silently=False)
+    except Exception:
+        logger.exception("checkout_webhook_alert_email_failed reason=%s", reason)

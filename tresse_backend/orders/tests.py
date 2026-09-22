@@ -12,7 +12,7 @@ from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.cache import cache
 from django.db import IntegrityError
 from django.template.loader import render_to_string
-from django.test import Client, RequestFactory, TestCase
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -321,7 +321,12 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
 
         self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
 
-    def test_insufficient_stock_does_not_create_order(self):
+    @patch("orders.views_stripe.send_checkout_stock_sold_out_email")
+    @patch("orders.views_stripe.stripe.Refund.create")
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_insufficient_stock_does_not_create_order(
+        self, mock_alert, mock_refund, mock_customer_email
+    ):
         from orders.views_stripe import _build_cart_signature
 
         self.cart_item.quantity = 10
@@ -336,6 +341,323 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_test_123").exists())
         self.product_size.refresh_from_db()
         self.assertEqual(self.product_size.quantity, 5)
+        mock_refund.assert_called_once()
+
+
+class CheckoutWebhookAlertTestCase(StripeWebhookBaseTestCase):
+    """The 'Stripe captured money, no order got created' branches of
+    stripe_webhook: each must alert ops, and the stock-shortage branch must
+    also refund the customer and tell them."""
+
+    def _build_session(self, cart_sig="sig", payment_intent="pi_test_alert", **overrides):
+        payload = {
+            "id": "cs_test_alert",
+            "payment_intent": payment_intent,
+            "amount_total": 10000,
+            "amount_subtotal": 10000,
+            "total_details": {"amount_discount": 0, "amount_tax": 0},
+            "customer_details": {
+                "name": "Anna Smith",
+                "email": "anna_webhook@example.com",
+                "address": {
+                    "line1": "123 Main St",
+                    "line2": "",
+                    "city": "Kyiv",
+                    "state": "",
+                    "postal_code": "01001",
+                    "country": "UA",
+                },
+            },
+            "metadata": {
+                "user_id": str(self.user.id),
+                "cart_id": str(self.cart.id),
+                "cart_sig": cart_sig,
+                "policy_accepted": "true",
+                "policy_version": "2026-06",
+                "custom_size_final_sale_acknowledged": "false",
+            },
+        }
+        payload.update(overrides)
+        return payload
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_missing_metadata_sends_alert(self, mock_alert):
+        session = self._build_session(metadata={})
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "missing_metadata")
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_user_not_found_sends_alert(self, mock_alert):
+        session = self._build_session(
+            metadata={
+                "user_id": "999999",
+                "cart_id": str(self.cart.id),
+                "cart_sig": "sig",
+                "policy_accepted": "true",
+                "policy_version": "2026-06",
+                "custom_size_final_sale_acknowledged": "false",
+            }
+        )
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "user_not_found")
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_cart_not_found_sends_alert(self, mock_alert):
+        session = self._build_session(
+            metadata={
+                "user_id": str(self.user.id),
+                "cart_id": "999999",
+                "cart_sig": "sig",
+                "policy_accepted": "true",
+                "policy_version": "2026-06",
+                "custom_size_final_sale_acknowledged": "false",
+            }
+        )
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "cart_not_found")
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_empty_cart_sends_alert_when_no_order_exists(self, mock_alert):
+        self.cart_item.delete()
+        session = self._build_session()
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "empty_cart")
+
+    @patch(
+        "orders.views_stripe._extract_card_details_from_payment_intent",
+        return_value=("", ""),
+    )
+    @patch("orders.views_stripe.send_order_confirmation_email")
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_empty_cart_stays_silent_for_duplicate_delivery(
+        self, mock_alert, mock_email, mock_card
+    ):
+        from orders.views_stripe import _build_cart_signature
+
+        sig = _build_cart_signature([self.cart_item])
+        session = self._build_session(cart_sig=sig, payment_intent="pi_dup")
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        first = self._post_event(event)
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(Order.objects.filter(stripe_payment_intent="pi_dup").exists())
+        self.assertFalse(CartItem.objects.filter(cart=self.cart).exists())
+
+        # Same event delivered again: the cart is now empty because the
+        # first delivery already consumed it, but an order exists, so this
+        # is an expected idempotent retry, not a real problem.
+        second = self._post_event(event)
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(Order.objects.filter(stripe_payment_intent="pi_dup").count(), 1)
+        mock_alert.assert_not_called()
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_policy_consent_missing_sends_alert(self, mock_alert):
+        session = self._build_session(
+            metadata={
+                "user_id": str(self.user.id),
+                "cart_id": str(self.cart.id),
+                "cart_sig": "sig",
+                "policy_accepted": "false",
+                "policy_version": "",
+                "custom_size_final_sale_acknowledged": "false",
+            }
+        )
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "policy_consent_missing")
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_custom_ack_missing_sends_alert(self, mock_alert):
+        self.cart_item.custom_length_selected = True
+        self.cart_item.custom_length_cm = 120
+        self.cart_item.save()
+
+        from orders.views_stripe import _build_cart_signature
+
+        sig = _build_cart_signature([self.cart_item])
+        session = self._build_session(
+            cart_sig=sig,
+            metadata={
+                "user_id": str(self.user.id),
+                "cart_id": str(self.cart.id),
+                "cart_sig": sig,
+                "policy_accepted": "true",
+                "policy_version": "2026-06",
+                "custom_size_final_sale_acknowledged": "false",
+            },
+        )
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "custom_ack_missing")
+
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_cart_signature_mismatch_sends_alert(self, mock_alert):
+        session = self._build_session(cart_sig="tampered-signature")
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "cart_signature_mismatch")
+
+    @patch("orders.views_stripe.send_checkout_stock_sold_out_email")
+    @patch("orders.views_stripe.stripe.Refund.create")
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_stock_insufficient_alerts_refunds_and_notifies_customer(
+        self, mock_alert, mock_refund, mock_customer_email
+    ):
+        mock_refund.return_value = {"id": "re_soldout", "status": "succeeded"}
+        self.cart_item.quantity = 10
+        self.cart_item.save()
+
+        from orders.views_stripe import _build_cart_signature
+
+        sig = _build_cart_signature([self.cart_item])
+        session = self._build_session(cart_sig=sig, payment_intent="pi_soldout")
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_soldout").exists())
+        self.product_size.refresh_from_db()
+        self.assertEqual(self.product_size.quantity, 5)
+
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["reason"], "stock_insufficient")
+
+        mock_refund.assert_called_once()
+        refund_kwargs = mock_refund.call_args.kwargs
+        self.assertEqual(refund_kwargs["payment_intent"], "pi_soldout")
+        self.assertEqual(refund_kwargs["idempotency_key"], "stock_sold_out_refund_pi_soldout")
+
+        mock_customer_email.assert_called_once()
+        email_kwargs = mock_customer_email.call_args.kwargs
+        self.assertEqual(email_kwargs["to_email"], "anna_webhook@example.com")
+        self.assertEqual(email_kwargs["amount"], Decimal("100.00"))
+
+    @patch("orders.views_stripe.send_checkout_stock_sold_out_email")
+    @patch(
+        "orders.views_stripe.stripe.Refund.create",
+        side_effect=stripe.error.StripeError("boom"),
+    )
+    @patch("orders.views_stripe.send_checkout_webhook_alert")
+    def test_stock_insufficient_refund_failure_skips_customer_email(
+        self, mock_alert, mock_refund, mock_customer_email
+    ):
+        self.cart_item.quantity = 10
+        self.cart_item.save()
+
+        from orders.views_stripe import _build_cart_signature
+
+        sig = _build_cart_signature([self.cart_item])
+        session = self._build_session(cart_sig=sig, payment_intent="pi_soldout_fail")
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(Order.objects.filter(stripe_payment_intent="pi_soldout_fail").exists())
+        mock_refund.assert_called_once()
+        mock_customer_email.assert_not_called()
+
+
+class CheckoutWebhookAlertHelperTestCase(StripeWebhookBaseTestCase):
+    """A failure inside send_checkout_webhook_alert (Sentry or the support
+    email) must be logged and swallowed, never bubble up into the webhook
+    response — exercised through the real helper, not a mock of it."""
+
+    @override_settings(SUPPORT_EMAIL="ops@example.com")
+    @patch("orders.emails.EmailMessage.send", side_effect=Exception("smtp down"))
+    def test_failing_support_email_still_returns_200(self, mock_send):
+        session = {
+            "id": "cs_test_alertfail",
+            "payment_intent": None,
+            "amount_total": 0,
+            "amount_subtotal": 0,
+            "total_details": {},
+            "customer_details": {},
+            "metadata": {},
+        }
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_send.assert_called_once()
+
+    @override_settings(SUPPORT_EMAIL="ops@example.com")
+    @patch("orders.emails.sentry_sdk.capture_message", side_effect=Exception("sentry down"))
+    def test_failing_sentry_capture_still_returns_200_and_still_emails(self, mock_capture):
+        session = {
+            "id": "cs_test_sentryfail",
+            "payment_intent": None,
+            "amount_total": 0,
+            "amount_subtotal": 0,
+            "total_details": {},
+            "customer_details": {},
+            "metadata": {},
+        }
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        with patch("orders.emails.EmailMessage.send") as mock_send:
+            resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_capture.assert_called_once()
+        mock_send.assert_called_once()
+
+    @override_settings(SUPPORT_EMAIL="")
+    @patch("orders.emails.sentry_sdk.capture_message")
+    def test_no_support_email_configured_skips_email_but_still_calls_sentry(self, mock_capture):
+        session = {
+            "id": "cs_test_nosupport",
+            "payment_intent": None,
+            "amount_total": 0,
+            "amount_subtotal": 0,
+            "total_details": {},
+            "customer_details": {},
+            "metadata": {},
+        }
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        with patch("orders.emails.EmailMessage.send") as mock_send:
+            resp = self._post_event(event)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_capture.assert_called_once()
+        mock_send.assert_not_called()
 
 
 class StripeWebhookSignatureTestCase(StripeWebhookBaseTestCase):
