@@ -131,9 +131,9 @@ export default function Authorization() {
 				return;
 			}
 
-			if (refresh) localStorage.setItem("refresh", refresh);
-
-			dispatch(setCredentials({ token: access, user }));
+			dispatch(
+				setCredentials({ token: access, user, refresh: refresh ?? undefined }),
+			);
 
 			try {
 				await dispatch(mergeGuestCart()).unwrap();

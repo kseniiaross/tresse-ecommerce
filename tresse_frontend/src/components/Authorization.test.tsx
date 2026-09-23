@@ -23,11 +23,20 @@ vi.mock("../api/axiosInstance", () => ({
 	},
 }));
 
+// setAccessToken/setRefreshToken/removeRefreshToken delegate to real
+// localStorage (rather than being pure no-ops) so a test can assert the
+// refresh token setCredentials receives actually lands in storage.
 vi.mock("../types/token", () => ({
 	getAccessToken: vi.fn(() => null),
-	setAccessToken: vi.fn(),
-	setRefreshToken: vi.fn(),
-	removeRefreshToken: vi.fn(),
+	setAccessToken: vi.fn((token: string) => {
+		localStorage.setItem("access", token);
+	}),
+	setRefreshToken: vi.fn((token: string) => {
+		localStorage.setItem("refresh", token);
+	}),
+	removeRefreshToken: vi.fn(() => {
+		localStorage.removeItem("refresh");
+	}),
 	clearAuthStorage: vi.fn(),
 	AUTH_STORAGE_KEYS: { USER_KEY: "auth_user" },
 }));
@@ -123,6 +132,28 @@ describe("Authorization submission", () => {
 
 		await waitFor(() => {
 			expect(mockNavigate).toHaveBeenCalledWith("/", { replace: true });
+		});
+	});
+
+	it("stores the refresh token after a successful login", async () => {
+		mockedLoginUser.mockResolvedValueOnce({
+			access: "token123",
+			refresh: "refresh123",
+			user: {
+				id: 1,
+				email: "anna@example.com",
+				first_name: "Anna",
+				last_name: "Smith",
+			},
+		});
+		const user = userEvent.setup();
+		renderAuthorization();
+
+		await fillValidForm(user);
+		await user.click(screen.getByRole("button", { name: /log in/i }));
+
+		await waitFor(() => {
+			expect(localStorage.getItem("refresh")).toBe("refresh123");
 		});
 	});
 

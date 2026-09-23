@@ -155,8 +155,6 @@ export default function Register() {
 				return;
 			}
 
-			if (refresh) localStorage.setItem("refresh", refresh);
-
 			if (!user) {
 				const next = safeNext ?? "/";
 				navigate(`/authorization?next=${encodeURIComponent(next)}`, {
@@ -165,7 +163,9 @@ export default function Register() {
 				return;
 			}
 
-			dispatch(setCredentials({ token: access, user }));
+			dispatch(
+				setCredentials({ token: access, user, refresh: refresh ?? undefined }),
+			);
 
 			try {
 				await dispatch(mergeGuestCart()).unwrap();
