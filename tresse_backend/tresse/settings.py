@@ -280,11 +280,9 @@ EMAIL_TIMEOUT = config("EMAIL_TIMEOUT", default=10, cast=int)
 # ------------------------------------------------------------
 # Stripe
 # ------------------------------------------------------------
-USE_STRIPE = config("USE_STRIPE", default=False, cast=bool)
 STRIPE_PUBLIC_KEY = config("STRIPE_PUBLIC_KEY", default="")
 STRIPE_SECRET_KEY = config("STRIPE_SECRET_KEY", default="")
 STRIPE_WEBHOOK_SECRET = config("STRIPE_WEBHOOK_SECRET", default="")
-STRIPE_FIRST_ORDER_COUPON_ID = config("STRIPE_FIRST_ORDER_COUPON_ID", default="").strip()
 
 # ------------------------------------------------------------
 # reCAPTCHA

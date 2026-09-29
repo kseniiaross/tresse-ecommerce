@@ -334,6 +334,61 @@ def _extract_card_details_from_payment_intent(
     )
 
 
+def _extract_applied_discount_code(
+    session_id: str,
+) -> str:
+    """Best-effort lookup of the promotion code or coupon Stripe actually
+    applied to a completed Checkout Session. Never trusts what the session's
+    own metadata predicted before payment (a welcome code offered to the
+    customer is not the same thing as a code the customer actually entered)
+    — only what Stripe itself reports as applied. Returns "" if nothing was
+    applied, or if the lookup itself fails."""
+    if not session_id:
+        return ""
+
+    try:
+        expanded_session = stripe.checkout.Session.retrieve(
+            session_id,
+            expand=[
+                "total_details.breakdown.discounts",
+                "total_details.breakdown.discounts.discount.promotion_code",
+            ],
+        )
+
+        breakdown = (expanded_session.get("total_details") or {}).get("breakdown") or {}
+
+        discounts = breakdown.get("discounts") or []
+
+        for entry in discounts:
+            discount = entry.get("discount") or {}
+
+            promotion_code = discount.get("promotion_code")
+
+            if isinstance(
+                promotion_code,
+                dict,
+            ):
+                code = str(promotion_code.get("code") or "").strip()
+
+                if code:
+                    return code
+
+            coupon = discount.get("coupon") or {}
+
+            coupon_code = str(coupon.get("id") or coupon.get("name") or "").strip()
+
+            if coupon_code:
+                return coupon_code
+
+    except Exception:
+        logger.exception(
+            "checkout_applied_discount_lookup_failed session_id=%s",
+            session_id,
+        )
+
+    return ""
+
+
 def _sync_refund_event(
     refund: dict,
 ) -> None:
@@ -580,7 +635,7 @@ def create_checkout_session(
             "cart_id": str(cart.id),
             "cart_sig": (cart_sig),
             "is_first_order": ("true" if not has_paid_order else "false"),
-            "welcome_code": (WELCOME_PROMO_CODE if not has_paid_order else ""),
+            "welcome_code_offered": (WELCOME_PROMO_CODE if not has_paid_order else ""),
             "policy_accepted": ("true"),
             "policy_version": (POLICY_VERSION),
             "custom_size_final_sale_acknowledged": (
@@ -1049,6 +1104,8 @@ def stripe_webhook(
         card_last4,
     ) = _extract_card_details_from_payment_intent(payment_intent_id)
 
+    discount_code = _extract_applied_discount_code(session_id)
+
     # -------------------------------------------------------------------------
     # CREATE ORDER
     # -------------------------------------------------------------------------
@@ -1100,12 +1157,7 @@ def stripe_webhook(
                     currency="usd",
                     status="paid",
                     subtotal_amount=(subtotal_amount),
-                    discount_code=(
-                        metadata.get(
-                            "welcome_code",
-                            "",
-                        )
-                    ),
+                    discount_code=(discount_code),
                     discount_amount=(discount_amount),
                     tax_amount=(tax_amount),
                     total_amount=(total_amount),

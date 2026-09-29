@@ -251,11 +251,17 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         return payload
 
     @patch(
+        "orders.views_stripe._extract_applied_discount_code",
+        return_value="",
+    )
+    @patch(
         "orders.views_stripe._extract_card_details_from_payment_intent",
         return_value=("visa", "4242"),
     )
     @patch("orders.views_stripe.send_order_confirmation_email")
-    def test_successful_checkout_creates_order_and_decrements_stock(self, mock_email, mock_card):
+    def test_successful_checkout_creates_order_and_decrements_stock(
+        self, mock_email, mock_card, mock_discount
+    ):
         from orders.views_stripe import _build_cart_signature
 
         sig = _build_cart_signature([self.cart_item])
@@ -276,11 +282,15 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         self.assertFalse(CartItem.objects.filter(cart=self.cart).exists())
 
     @patch(
+        "orders.views_stripe._extract_applied_discount_code",
+        return_value="",
+    )
+    @patch(
         "orders.views_stripe._extract_card_details_from_payment_intent",
         return_value=("", ""),
     )
     @patch("orders.views_stripe.send_order_confirmation_email")
-    def test_duplicate_webhook_is_idempotent(self, mock_email, mock_card):
+    def test_duplicate_webhook_is_idempotent(self, mock_email, mock_card, mock_discount):
         from orders.views_stripe import _build_cart_signature
 
         sig = _build_cart_signature([self.cart_item])
@@ -291,6 +301,74 @@ class CheckoutSessionCompletedTestCase(StripeWebhookBaseTestCase):
         self._post_event(event)
 
         self.assertEqual(Order.objects.filter(stripe_payment_intent="pi_test_123").count(), 1)
+
+    @patch(
+        "orders.views_stripe.stripe.checkout.Session.retrieve",
+    )
+    @patch(
+        "orders.views_stripe._extract_card_details_from_payment_intent",
+        return_value=("", ""),
+    )
+    @patch("orders.views_stripe.send_order_confirmation_email")
+    def test_applied_promotion_code_is_stored_as_discount_code(
+        self, mock_email, mock_card, mock_retrieve
+    ):
+        from orders.views_stripe import _build_cart_signature
+
+        mock_retrieve.return_value = {
+            "total_details": {
+                "breakdown": {
+                    "discounts": [
+                        {
+                            "discount": {
+                                "promotion_code": {"code": "TRESSE15"},
+                                "coupon": {"id": "co_test", "name": "Welcome"},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+
+        sig = _build_cart_signature([self.cart_item])
+        session = self._build_session(sig)
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        self._post_event(event)
+
+        order = Order.objects.get(stripe_payment_intent="pi_test_123")
+        self.assertEqual(order.discount_code, "TRESSE15")
+        mock_retrieve.assert_called_once_with(
+            "cs_test_123",
+            expand=[
+                "total_details.breakdown.discounts",
+                "total_details.breakdown.discounts.discount.promotion_code",
+            ],
+        )
+
+    @patch(
+        "orders.views_stripe.stripe.checkout.Session.retrieve",
+    )
+    @patch(
+        "orders.views_stripe._extract_card_details_from_payment_intent",
+        return_value=("", ""),
+    )
+    @patch("orders.views_stripe.send_order_confirmation_email")
+    def test_no_discount_applied_stores_empty_discount_code(
+        self, mock_email, mock_card, mock_retrieve
+    ):
+        from orders.views_stripe import _build_cart_signature
+
+        mock_retrieve.return_value = {"total_details": {"breakdown": {"discounts": []}}}
+
+        sig = _build_cart_signature([self.cart_item])
+        session = self._build_session(sig)
+        event = _fake_stripe_event("checkout.session.completed", session)
+
+        self._post_event(event)
+
+        order = Order.objects.get(stripe_payment_intent="pi_test_123")
+        self.assertEqual(order.discount_code, "")
 
     def test_cart_signature_mismatch_does_not_create_order(self):
         session = self._build_session(cart_sig="tampered_signature")
