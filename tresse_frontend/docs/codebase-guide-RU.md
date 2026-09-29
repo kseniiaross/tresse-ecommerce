@@ -5627,6 +5627,2069 @@ unsubscribe/<str:token>/  -> UnsubscribeAPIView  (name: newsletter_unsubscribe)
 
 ---
 
+## Бэкенд — аккаунты (accounts)
+
+Продолжаем тот же файл-за-файлом обход, что и в разделах
+`newsletter`/шаблоны писем выше, теперь по `tresse_backend/accounts/` —
+приложению, которое владеет моделью `User`, регистрацией, логином,
+сбросом пароля, самостоятельным потоком деактивации/восстановления
+аккаунта и профилем с адресом доставки. Несколько файлов фронтенда
+вызывают его напрямую (`api/auth.ts`, `api/account/ChangePassword.ts`,
+`components/Authorization.tsx`, `components/Register.tsx`,
+`components/AccountRestore.tsx`, `components/PasswordResetConfirm.tsx`,
+`components/PasswordChange.tsx`, `view/Dashboard.tsx`), и этот раздел
+даёт перекрёстную ссылку на каждый по пути, а не повторяет то, что уже
+задокументировано выше.
+
+### `accounts/models.py`
+
+**Что это:** `UserManager` (кастомный `BaseUserManager`), `User`
+(кастомный `AbstractBaseUser`/`PermissionsMixin`, на основе email, а не
+стандартной username-модели Django) и `UserProfile` (запись адреса
+доставки один-к-одному).
+
+**Зачем существует:** логин по email требует кастомной модели
+пользователя — встроенный `User` Django строится вокруг username.
+Мягкое удаление живёт прямо на `User` (`is_active`/`deleted_at`), а не в
+отдельной таблице, а адрес доставки вынесен в `UserProfile`, чтобы
+`User` оставался только про identity/auth.
+
+**Что экспортирует:** `UserManager`, `User`, `UserProfile`.
+
+**Как это работает:**
+- **`UserManager.create_user(email, phone_number, password, first_name,
+  last_name, **extra_fields)`**: кидает обычный `ValueError` (не ошибку
+  валидации DRF), если `email`, `phone_number` или любое из имён ложны —
+  этот метод работает на уровне модели/менеджера, независимо от
+  веб-фреймворка, так что это последний рубеж инварианта, а не основной
+  путь валидации (см. `RegisterSerializer` ниже — проверку со стороны
+  HTTP). Нормализует `email` (`self.normalize_email(...).strip().lower()`)
+  и обрезает пробелы у `phone_number`/обоих имён, хеширует пароль через
+  `set_password`, сохраняет.
+- **`create_superuser(email, password, **extra_fields)`**: по умолчанию
+  ставит `is_staff`/`is_superuser`/`is_active` в `True` и — только если
+  ещё не передано — `phone_number` в `"0000000000"`,
+  `first_name`/`last_name` в `"Admin"`/`"User"`, так что чисто
+  программный вызов (скрипт, миграция данных) не должен придумывать
+  значения для полей, которые ему не важны. Email нормализуется так же.
+- **Поля:** `email` (`EmailField`, `unique=True`); `phone_number`
+  (`CharField`, максимум 15, **не** уникален сегодня — см. раздел
+  миграций ниже про то, как это менялось); `first_name`/`last_name`
+  (`CharField`, максимум 30); `is_email` (`BooleanField`, по умолчанию
+  `False` — см. «На что обратить внимание»); `is_active`/`is_staff`;
+  `date_joined` (`auto_now_add`); `deleted_at` (nullable `DateTimeField`)
+  — единственное поле, которое логика окна восстановления в
+  `accounts/views.py` (`RESTORE_WINDOW_DAYS`) читает, чтобы решить,
+  всё ли ещё действительна ссылка восстановления.
+  `groups`/`user_permissions` переобъявляют дефолтные M2M-поля
+  `PermissionsMixin` исключительно ради неконфликтующих `related_name`
+  (`custom_user_groups`/`custom_user_permissions`) — это требуется всегда,
+  когда `AbstractBaseUser` + `PermissionsMixin` используются напрямую
+  вместо `AbstractUser`, поскольку `auth.Group`/`auth.Permission` уже
+  указывают `related_name` на стандартную модель `auth.User`.
+- `USERNAME_FIELD = "email"`, `REQUIRED_FIELDS = ["phone_number",
+  "first_name", "last_name"]` — читаются интерактивными запросами
+  `manage.py createsuperuser` и админкой Django, но не самим потоком
+  логина DRF (тот использует собственный override `username_field` в
+  `CustomTokenObtainPairSerializer` — см. `serializers.py` ниже).
+- **`mark_deleted()`**: ставит `is_active=False`,
+  `deleted_at=timezone.now()` и вызывает `set_unusable_password()` —
+  механизм Django для хеша пароля, который никогда не совпадёт ни с
+  каким вводом, в отличие от пустой строки — затем сохраняет ровно эти
+  три поля. Вызывается из `DeleteAccountAPIView` (самостоятельная
+  деактивация). Полного удаления/стирания данных в этом коде вообще нет
+  — строка и история заказов хранятся бессрочно.
+- **`restore(new_password=None)`**: ставит `is_active=True`,
+  `deleted_at=None`; если передан пароль, тоже хеширует и сохраняет его.
+  Используется напрямую только тестами уровня модели
+  (`accounts/tests.py`'s `UserSoftDeleteTestCase`) — реальный HTTP-эндпоинт
+  восстановления, `AccountRestoreConfirmAPIView`, **не** вызывает этот
+  метод; он инлайнит то же самое присвоение трёх полей сам (см. «На что
+  обратить внимание» у `views.py` ниже).
+- `__str__`: `"{email} ({phone_number})"`.
+
+**`UserProfile`**: один-к-одному с `User` (`related_name="profile"`);
+`address_line1`/`apartment`/`city`/`state`/`postal_code`/`country`, все
+`CharField(blank=True, default="")` — никогда `null`, так что
+неустановленное поле адреса всегда читается как `""`, никогда как
+`None`, дальше по всему стеку; `updated_at` (`auto_now`), вообще нет
+`created_at`. Ничто не создаёт `UserProfile` в момент регистрации —
+`ProfileAPIView` (`views.py`) лениво делает `get_or_create` при первом
+`GET`/`PUT`, так что у только что созданного пользователя ноль строк
+`UserProfile`, пока он впервые не обратится к `/accounts/profile/`.
+
+**С чем взаимодействует:** `auth.Group`/`auth.Permission` Django (через
+`PermissionsMixin`). Читается в `accounts/serializers.py`,
+`accounts/views.py`, `accounts/admin.py`, `orders/models.py`
+(внешний ключ `Order.user`), `products/models.py` (`Cart.user`,
+`ProductWishlist.user`, `StockSubscription.user`).
+
+**На что обратить внимание:**
+- **`is_email` выглядит как мёртвый черновик.** Названо так, будто
+  отслеживает «подтвердил ли этот пользователь свой email», но ничто в
+  `accounts/views.py`, `serializers.py`, `emails.py` или `urls.py`
+  никогда его не читает и не пишет (подтверждено grep-ом по всему
+  приложению) — потока подтверждения email в этом коде вообще нет. Это
+  совпадает с собственной находкой руководства по фронтенду о том, что
+  `templates/emails/accounts/email_verification.txt` тоже не используется:
+  похоже, это остатки одной и той же никогда не построенной (или
+  удалённой) фичи.
+- **Уникальность `phone_number` менялась дважды.** Миграция `0002`
+  сделала его `unique=True` (с шагом `RunPython`, сначала заполняющим
+  фиктивное значение для любых null-строк); миграция `0006` убрала это
+  ограничение обратно до простого, неуникального `CharField` —
+  совпадает с моделью, как она читается сегодня. Сейчас два разных
+  пользователя могут иметь один и тот же номер телефона.
+- **`mark_deleted()`/`restore()` — не единственные места, где это
+  делается.** `DeleteAccountAPIView` действительно вызывает
+  `mark_deleted()`, но `AccountRestoreConfirmAPIView` инлайнит свой
+  собственный `is_active = True; deleted_at = None; ...;
+  save(update_fields=[...])`, а не вызывает `restore()`. Сегодня оба
+  пути ставят одни и те же поля, так что это дублирование, а не
+  поведенческий разрыв — но эти два пути могли бы молча разойтись, если
+  бы `restore()` когда-нибудь обзавёлся новым побочным эффектом, который
+  view не подхватил бы автоматически.
+
+**Вопросы для интервью:**
+- *В: Почему `UserManager.create_user` кидает обычный `ValueError` для
+  отсутствующего email/телефона/имени вместо чего-то в форме DRF?* —
+  Потому что этот метод работает на уровне модели/менеджера, который
+  Django использует независимо от веб-фреймворка (`createsuperuser`,
+  миграция данных, разовый скрипт) — собственные валидаторы полей
+  `RegisterSerializer` превращают «пустую строку» в нормальный ответ
+  `400` ещё до того, как `create_user` вообще будет достигнут из API;
+  `ValueError` менеджера — это инвариант последней инстанции, а не
+  основной путь валидации.
+- *В: Почему `deleted_at` nullable и отдельно от `is_active`, вместо
+  того чтобы полагаться только на `is_active` как на «удалён»?* — У
+  `is_active` уже есть более старое, независимое значение в Django
+  (бэкенды аутентификации отказываются авторизовать неактивного
+  пользователя, независимо от причины), а политике окна восстановления
+  нужна временная метка, чтобы отсчитывать от неё 30 дней — один
+  `is_active` может сказать «может ли этот пользователь сейчас
+  залогиниться», но не «когда он был деактивирован», а это как раз то,
+  с чем должно сравнивать `RESTORE_WINDOW_DAYS`.
+- **Более сложный вопрос:** *В: `mark_deleted()` вызывает
+  `set_unusable_password()` вместо того, чтобы оставить существующий
+  хеш на месте. Учитывая, что аккаунт уже `is_active=False` и всё равно
+  не может залогиниться, что на самом деле даёт этот выбор?* —
+  `is_active=False` блокирует аутентификацию через обычный поток логина,
+  но не аннулирует задним числом JWT access-токен, выданный **до**
+  деактивации — токены SimpleJWT самодостаточны и остаются
+  действительными до собственного истечения срока или явной записи в
+  чёрный список (`INSTALLED_APPS` действительно включает
+  `rest_framework_simplejwt.token_blacklist`; **unverified** в этом
+  проходе, действительно ли деактивация что-то заносит в чёрный
+  список). Сделать хеш пароля непригодным означает, что даже если
+  `is_active` каким-то образом обойдут, или старый пароль будет угадан
+  или утечёт в другом месте, деактивированный аккаунт всё равно нельзя
+  залогинить через парольную аутентификацию — `restore()` (или
+  эквивалентный инлайновый код в `AccountRestoreConfirmAPIView`) —
+  единственный путь обратно, и он требует либо установки нового пароля,
+  либо того, чтобы у аккаунта уже был восстановлен пригодный пароль
+  каким-то другим путём, так что деактивированный аккаунт никогда нельзя
+  молча реактивировать тому, кто просто знал старый пароль.
+
+### `accounts/migrations/`
+
+Шесть миграций по порядку: `0001_initial` создаёт кастомную модель
+`User` в том виде, в каком она была в начале (Django 5.1.5, судя по
+комментарию в заголовке). `0002` убирает давно заброшенное поле
+`is_phone_number`, делает `email` и `phone_number` оба `unique=True`, и
+заполняет `RunPython(set_default_values)` для любых уже существующих
+null-строк перед тем как затянуть ограничение. `0003`/`0004` добавляют,
+а затем перетипизируют `first_name`/`last_name`. `0005` создаёт
+`UserProfile`. `0006` добавляет `deleted_at` и — единственное изменение,
+которое стоит выделить отдельно — **убирает `unique=True` у
+`phone_number`** обратно до простого `CharField`, отменяя то, что
+добавила `0002`; это единственное место в истории миграций, где
+ограничение сначала затянули, а потом намеренно ослабили снова, и
+именно поэтому `models.py` сегодня явно пишет `unique=False`, а не
+оставляет это неявным.
+
+### `accounts/serializers.py`
+
+**Что это:** `CustomTokenObtainPairSerializer` (логин),
+`RegisterSerializer`, `ChangePasswordSerializer`,
+`PasswordResetRequestSerializer`, `PasswordResetConfirmSerializer`,
+`ProfileSerializer` — каждая граница валидации входа/выхода, которую
+использует это приложение, в одном файле (специальной валидации на
+стороне `accounts/views.py` нет, кроме двух view восстановления
+аккаунта, которые читают сырой `request.data` напрямую, вообще без
+сериализатора — см. `views.py` ниже).
+
+**Как это работает, по классам:**
+- **`CustomTokenObtainPairSerializer(TokenObtainPairSerializer)`**:
+  ставит `username_field = "email"`, чтобы логин SimpleJWT принимал
+  `email`+`password` вместо `username`+`password`. `validate()`
+  приводит входящий `email` к нижнему регистру и обрезает пробелы,
+  маппит его на ожидаемые SimpleJWT ключи `username`/`password`,
+  вызывает `super().validate(attrs)` (который аутентифицирует и выдаёт
+  пару токенов), затем явно перепроверяет `self.user.is_active` и
+  кидает `ValidationError({"detail": "Account is deactivated. Please
+  restore it via email."}`, если оно `False` — эта проверка
+  **избыточна** относительно собственного `ModelBackend` Django,
+  который уже по умолчанию отказывается аутентифицировать неактивного
+  пользователя (так что `super().validate` обычно уже упал бы раньше,
+  чем эта строка вообще будет достигнута); она существует, чтобы дать
+  этому отказу конкретное, фирменное сообщение, указывающее на поток
+  восстановления, а не на общую формулировку SimpleJWT "No active
+  account found with the given credentials". При успехе добавляет объект
+  `user: {id, email, first_name, last_name}` в ответ рядом со
+  стандартными `{access, refresh}` SimpleJWT — именно отсюда
+  `normalizeUser` из `authSlice.ts`
+  (`tresse_frontend/src/utils/authSlice.ts`) читает свои snake_case
+  `first_name`/`last_name`.
+- **`RegisterSerializer(ModelSerializer)`**: `password` (`write_only`,
+  `min_length=8`), `email` (`EmailField`), `phone_number` (`CharField`);
+  `Meta.fields` также включает `first_name`/`last_name` из модели.
+  `validate_email` отклоняет регистронезависимый дубликат
+  (`User.objects.filter(email__iexact=email).exists()`) и нормализует
+  значение. `validate_phone_number` просто отклоняет пустую строку
+  после обрезки пробелов — никакой проверки формата/паттерна вообще нет
+  (собственная Yup-схема фронтенда, судя по разделу руководства про
+  `Register.tsx`, добавляет regex для номера телефона на клиенте; на
+  сервере это ничем не обеспечено). `validate_password` запускает
+  `validate_password` Django (проверки на распространённый пароль/
+  полностью числовой/похожесть, а не только `min_length=8`, который уже
+  обеспечивает само поле). `create()` повторно нормализует
+  email/телефон (доп. подстраховка на случай, если что-то обошло
+  валидаторы полей) и вызывает `User.objects.create_user(...)`.
+- **`ChangePasswordSerializer(Serializer)`**: `current_password`,
+  `new_password` (`min_length=8`), `confirm_password` (`min_length=8`),
+  все `write_only`. `validate()` проверяет `new_password ==
+  confirm_password`. `validate_new_password` запускает
+  `validate_password`. **`save(user)`** — нестандартная сигнатура: у
+  обычного `Serializer` нет модели, к которой можно автоматически
+  сохраняться, поэтому этот класс определяет свой собственный `save`,
+  который явно принимает `user` параметром
+  (`ChangePasswordAPIView` вызывает `serializer.save(user=user)`), а не
+  полагается на обычный механизм `instance`/`create`/`update` DRF. Сам
+  он **не** проверяет `current_password` — эта проверка живёт в
+  `ChangePasswordAPIView.post`, на уровень выше, поскольку только у view
+  есть доступ к `request.user`, против которого можно проверить пароль.
+- **`PasswordResetRequestSerializer(Serializer)`**: одно поле, `email`
+  (`EmailField`) — чистая проверка формы; вся логика «существует ли этот
+  пользователь, активен ли он» живёт во view.
+- **`PasswordResetConfirmSerializer(Serializer)`**: `uidb64`, `token`
+  (оба простой `CharField`), `new_password`/`confirm_password` (оба
+  `min_length=8`, `write_only`). Тот же паттерн проверки совпадения и
+  `validate_password`, что и у `ChangePasswordSerializer`. Заметьте: у
+  этого сериализатора вообще **нет** осведомлённости об `is_active` —
+  отказ для деактивированного аккаунта, добавленный для [[P0-04]] (в
+  `docs/fixes-2026-09.md`), живёт целиком в
+  `PasswordResetConfirmAPIView`, а не здесь.
+- **`ProfileSerializer(Serializer)`**: девять полей
+  (`first_name`/`last_name`/`email` из `User`;
+  `address_line1`/`apartment`/`city`/`state`/`postal_code`/`country` из
+  `UserProfile`), каждое `required=False, allow_blank=True` — это
+  плоский единый сериализатор, охватывающий две модели, точно совпадая
+  с тем, что нужно `ProfileAPIView.put` для обновления с
+  `partial=True`, где может присутствовать любое подмножество полей. По
+  состоянию на [[P1-04]] (в `docs/fixes-2026-09.md`), каждое имя поля
+  здесь — тот же snake_case, который собственные `mapFormToApi`/
+  `mapApiToForm` фронтенда (`tresse_frontend/src/view/Dashboard.tsx`)
+  уже отправляли и ожидали — до этого фикса `ProfileAPIView` (не этот
+  сериализатор, который никогда не был проблемой) читал и писал
+  несовпадающий набор camelCase-ключей на сервере, так что четыре из
+  этих девяти полей молча терялись при каждом сохранении, несмотря на
+  то что фронтенд всегда отправлял правильную форму.
+
+**С чем взаимодействует:** `accounts/models.py` (`User`), `validate_password`
+Django (`django.contrib.auth.password_validation`, управляется
+`AUTH_PASSWORD_VALIDATORS` в `tresse/settings.py`),
+`TokenObtainPairSerializer` из SimpleJWT. Используется каждым view в
+`accounts/views.py`, кроме двух view восстановления аккаунта.
+
+**На что обратить внимание:** три разных сериализатора
+(`ChangePasswordSerializer`, `PasswordResetConfirmSerializer`, и
+инлайновый вызов `validate_password` в `accounts/views.py` для
+восстановления аккаунта) каждый независимо переизобретает один и тот же
+паттерн «`new_password`/`confirm_password` должны совпадать, затем
+запусти `validate_password`» — общего миксина или базового класса,
+выносящего это, нет, так что будущее изменение этого правила (например,
+добавление проверки истории паролей) пришлось бы вносить вручную в трёх
+разных местах.
+
+**Вопросы для интервью:**
+- *В: `CustomTokenObtainPairSerializer.validate` перепроверяет
+  `self.user.is_active` сразу после вызова `super().validate(attrs)`.
+  Учитывая, что `ModelBackend` Django уже отказывается аутентифицировать
+  неактивного пользователя, когда эта вторая проверка вообще успевает
+  сработать?* — Только если что-то в конкретной комбинации версий
+  SimpleJWT/Django само по себе не блокирует неактивного пользователя
+  до возврата из `super().validate` — в обычном случае
+  `ModelBackend.user_can_authenticate` уже кидает исключение раньше, чем
+  эта строка будет достигнута, делая явную проверку фактически
+  недостижимым защитным кодом; она ничего не стоит и даёт фирменное
+  сообщение об ошибке, если это допущение когда-нибудь перестанет
+  выполняться (например, позже подключат кастомный бэкенд
+  аутентификации, который сам не проверяет `is_active`).
+- *В: Почему `ChangePasswordSerializer.save` принимает `user` явным
+  аргументом вместо того, чтобы сериализатор конструировался с
+  `instance=user`?* — У обычного `Serializer` (не `ModelSerializer`) нет
+  встроенного понятия экземпляра для обновления — передать `user`
+  напрямую в `save()` проще, чем налаживать `instance`/`update()` для
+  сериализатора, который на самом деле не моделирует `User` целиком, а
+  только три поля, связанных с паролем.
+- **Более сложный вопрос:** *В:
+  `RegisterSerializer.validate_phone_number` отклоняет только пустую
+  строку — никакой проверки формата вообще. Проследите, что на самом
+  деле мешает регистрации с, скажем, `phone_number: "abc"` пройти
+  успешно.* — Ничто не мешает, на сервере. `UserManager.create_user`
+  проверяет только истинность (`if not phone_number: raise
+  ValueError(...)`), а само поле `User.phone_number` — обычный,
+  никак не ограниченный `CharField`. Единственное, что стоит между
+  некорректным номером телефона и сохранённой строкой — собственный
+  regex Yup во фронтенде, в `components/Register.tsx` — запрос,
+  собранный вручную (или любым другим клиентом), минуя эту форму,
+  успешно зарегистрируется с `phone_number = "abc"`.
+
+### `accounts/throttles.py`
+
+`LoginAnonThrottle`/`LoginUserThrottle`, `RegisterAnonThrottle`/
+`RegisterUserThrottle` — четыре маленьких подкласса
+`AnonRateThrottle`/`UserRateThrottle`, каждый называет один бакет
+ограничения частоты (`scope`). Сами частоты живут в
+`DEFAULT_THROTTLE_RATES` в `tresse/settings.py`
+(`THROTTLE_LOGIN_ANON` и т. д.). **На что обратить внимание:** этот же
+самый набор из четырёх классов **переопределён заново**, дословно,
+прямо внутри самого `accounts/views.py` (см. ниже) — каждый view ниже
+ссылается именно на *эти* классы, не на классы из `throttles.py`; этот
+модульный файл, похоже, ничем в этом приложении не используется —
+`accounts/urls.py`'s view все ссылаются на классы, объявленные прямо в
+`views.py`, не на эти. **Unverified**, использует ли что-то за пределами
+`accounts/` импорт из этого файла; grep по всему репозиторию на
+`from accounts.throttles import` или `from .throttles import` внутри
+самого `accounts/` подтвердил бы, мёртвый ли это код, дублирующий
+четыре имени классов, которые уже существуют в соседнем файле.
+
+### `accounts/middleware.py`
+
+**Что это:** один класс middleware, `AuthenticationMiddleware`
+(локально определённый класс с **тем же именем**, что и собственный
+`django.contrib.auth.middleware.AuthenticationMiddleware` Django —
+реальная, легко запутывающая коллизия имён; смотрите список
+`MIDDLEWARE` в `tresse/settings.py` напрямую, если важно, какой из них
+на самом деле подключён и в каком порядке относительно другого).
+
+**Что делает:** возвращает голый `204` для `/favicon.ico` раньше всего
+остального, так что автоматический запрос браузера за favicon вообще не
+доходит ни до роутинга URL Django, ни до механизма аутентификации.
+Иначе, для неаутентифицированного (`AnonymousUser`) запроса, чей путь
+начинается с `/api/register`, `/api/login`, `/api/products` или
+`/api/reviews`, он вызывает напрямую `get_response(request)`. Для
+любого другого запроса — аутентифицированного или нет, и для
+анонимного запроса к любому *другому* пути — он тоже просто вызывает
+`get_response(request)`.
+
+**На что обратить внимание:** **ветка со списком разрешённых путей и
+запасной путь делают абсолютно одно и то же.** Оба пути кода
+заканчиваются `return self.get_response(request)` (или эквивалентом в
+конце функции) — блок `if` не даёт никакого реального
+короткого замыкания, никакого другого ответа, никакого заголовка,
+ничего наблюдаемо отличного от того, что произошло бы, если бы этот
+middleware был вообще удалён и заменён безусловным
+`return self.get_response(request)`. Каким бы ни было реальное
+управление доступом, которое уже делают собственные
+`permission_classes` DRF на каждом view (`AllowAny` у
+`RegisterAPIView`, `login`, `ProductViewSet` и т. д.) — это и есть
+реальный барьер; список разрешённых путей у этого middleware инертен.
+**Unverified**, задумывалось ли это как *запрет* всего остального
+(т. е. настоящая логика, вероятно, должна была быть «если анонимный и
+путь не в этом списке — отказать», ровно противоположное написанному)
+и условие написали задом наперёд, или это остаток более раннего
+дизайна, где список действительно имел значение, а ветка `else` тогда
+отличалась; в любом случае, чтение этого файла от начала до конца не
+даёт никакого функционального поведения, кроме короткого замыкания на
+`/favicon.ico`.
+
+**Вопрос для интервью:** *В: Что изменилось бы функционально, если бы
+всё тело этого класса заменили просто на
+`return self.get_response(request)` для каждого запроса, кроме
+`/favicon.ico`?* — Ничего — каждая ветка уже разрешается ровно в этот
+же вызов; проверка `isinstance(request.user, AnonymousUser)`/префикса
+пути — это мёртвая условная логика, оба исхода которой сходятся к одной
+и той же строке.
+
+### `accounts/emails.py`
+
+Три отправителя простого текста, каждый обёрнут в свой
+`try/except Exception: logger.exception(...)`, так что ошибка шаблона
+или SMTP никогда не пробрасывается обратно вызывающему:
+`send_account_welcome_email` (регистрация), `send_account_deleted_email`
+(деактивация, с опциональным `restore_url` — шаблон полностью скрывает
+свой раздел со ссылкой восстановления, если это пусто, судя по
+собственному прочтению `account_deactivated.txt` руководством по
+фронтенду), и `send_account_restore_email` (поток запроса
+восстановления). **Перекрёстная ссылка:** раздел руководства по
+фронтенду «Бэкенд — шаблоны писем» уже подробно документирует
+**сломанное имя файла** `account_restore.txt` (лишний пробел на диске
+против точной строки, которую передаёт `render_to_string` этого файла)
+и тот факт, что ни один тест в `accounts/tests.py` не выполняет
+настоящий рендер шаблона именно этой функции — каждый тест потока
+восстановления мокает саму `send_account_restore_email`, а не даёт ей
+выполниться, так что сломанная ссылка невидима для набора тестов. Эта
+находка — именно про эту функцию; здесь она не повторяется целиком.
+
+### `accounts/admin.py`
+
+**Что это:** `UserAdmin` (с `UserProfileInline` и read-only
+`OrderInline` из `orders.models.Order`) и `UserProfileAdmin`.
+
+**Как это работает:** `UserAdmin.list_display` добавляет несколько
+вычисляемых колонок — `cart_items_count`, `cart_total`,
+`wishlist_items_count`, `orders_count`, `orders_total` — каждая делает
+свой собственный запрос на строку (без аннотации на самом queryset
+списка изменений), так что список пользователей в админке — это `N`
+дополнительных запросов на страницу, а не один. Два массовых действия,
+`send_cart_reminder`/`send_wishlist_reminder`, проходят по выбранным
+пользователям и вызывают `send_cart_reminder_email`/
+`send_wishlist_reminder_email` из `products/emails.py` напрямую,
+пропуская тех, у кого пустая корзина/вишлист, и сообщая счётчики
+отправлено/пропущено/не удалось через `self.message_user`.
+
+**На что обратить внимание:** цикл `cart_total`'s по элементам
+(`product.price * item.quantity` для каждого `CartItem`) полностью
+игнорирует `custom_length_surcharge` — в отличие от собственной логики
+снимка `CartItemSerializer` (см. `products/serializers.py` ниже),
+которая как раз и отражает реальную сумму корзины, видимую клиенту.
+Админ, смотрящий на эту колонку для корзины с товаром произвольной
+длины, увидит число **меньше**, чем реально будет списано с клиента при
+оформлении заказа.
+
+### `accounts/urls.py`
+
+```
+register/                     -> RegisterAPIView              (name: register)
+token/                        -> CustomTokenObtainPairView     (name: token_obtain_pair)
+token/refresh/                -> TokenRefreshView               (name: token_refresh, собственный view SimpleJWT)
+change-password/              -> ChangePasswordAPIView         (name: change-password)
+request-password-reset/       -> PasswordResetRequestAPIView   (name: password-reset-request)
+reset-password/confirm/       -> PasswordResetConfirmAPIView   (name: password-reset-confirm)
+restore/request/               -> AccountRestoreRequestAPIView  (name: restore-request)
+restore/confirm/               -> AccountRestoreConfirmAPIView  (name: restore-confirm)
+profile/                       -> ProfileAPIView                (name: profile)
+delete-account/                -> DeleteAccountAPIView          (name: delete-account)
+```
+
+Подключено на `api/accounts/` через `tresse/urls.py`. **На что обратить
+внимание:** сегменты пути URL не всегда совпадают с собственными
+именами фронтенда для того же действия — `restore/request/`+
+`restore/confirm/` (бэкенд) против `requestAccountRestore`/
+`confirmAccountRestore` (имена функций фронтенда, `api/auth.ts`) —
+прямое совпадение, но `reset-password/confirm/` (путь бэкенда)
+достигается через `components/PasswordResetConfirm.tsx`, постящий
+напрямую на `/accounts/reset-password/confirm/` (не через обёртку в
+стиле `api/auth.ts`) — ни на одной из сторон нет единого файла, который
+перечислял бы каждую пару путь/имя так, как эта таблица; соответствие
+существует только благодаря тому, что каждый вызывающий сопоставляет
+URL каждого view вручную.
+
+### `accounts/views.py`
+
+**Что это:** бизнес-логика каждого эндпоинта, связанного с аккаунтом —
+аутентификация (`CustomTokenObtainPairView`, `RegisterAPIView`,
+`ChangePasswordAPIView`), сброс пароля, восстановление аккаунта
+(запрос/подтверждение), `GET`/`PUT` профиля и самостоятельная
+деактивация. Также, необычно для этого кода, **второй, дублирующий**
+набор определений классов throttle (`PasswordResetAnonThrottle`,
+`LoginAnonThrottle`, `RegisterAnonThrottle`, `RestoreAnonThrottle` и их
+пары `*UserThrottle`), объявленных прямо в этом файле, а не
+импортированных из `accounts/throttles.py` — каждый view ниже
+ссылается именно на *эти* классы, не на классы из `throttles.py` (см.
+собственное «На что обратить внимание» того файла).
+
+**Модульные хелперы:**
+- **`_recaptcha_enabled()`**: `False`, когда `settings.DEBUG` истинно
+  (так что локальные/dev-запуски никогда не требуют капчу независимо от
+  того, настроен ли секретный ключ), иначе `True` только если
+  `settings.RECAPTCHA_SECRET_KEY` установлен. Это единственный
+  переключатель, который проверяет каждый защищённый капчей view ниже,
+  прежде чем вызвать `_verify_recaptcha`.
+- **`_verify_recaptcha(token)`**: сразу возвращает `True`, если капча
+  вообще не включена; иначе постит токен на эндпоинт `siteverify`
+  Google (`requests.post`, таймаут 5с) и возвращает поле `success`, с
+  любым исключением (таймаут, сетевая ошибка, некорректный JSON),
+  проглоченным и трактуемым как неудачная проверка (`return False`
+  внутри голого `except Exception`).
+- **`_get_client_ip`**, **`_mask_email`**, **`_from_email`**: хелперы
+  для логирования/отображения — `_mask_email` оставляет первые 1–2
+  символа локальной части плюс полный домен (`"an***@example.com"` для
+  `"anna"`), используется только в вызовах `logger.info`/
+  `logger.exception`, никогда в ответе, видимом пользователю.
+- **`RESTORE_WINDOW_DAYS = getattr(settings, "ACCOUNT_RESTORE_WINDOW_DAYS",
+  30)`**: читается один раз в момент импорта (загрузки модуля), не на
+  каждый запрос — изменение настройки во время выполнения (например,
+  через `override_settings` в тесте, который не переимпортирует этот
+  модуль) **не** было бы подхвачено; тесты окна восстановления в
+  `accounts/tests.py` вместо попытки переопределить эту константу
+  напрямую меняют `deleted_at` пользователя, делая его старше/моложе
+  окна.
+
+**`CustomTokenObtainPairView`**: просто `serializer_class =
+CustomTokenObtainPairSerializer` плюс throttle логина — вся реальная
+логика живёт в сериализаторе (выше).
+
+**`RegisterAPIView`** (`AllowAny`, throttle регистрации): опциональная
+проверка капчи, затем `RegisterSerializer`, затем
+`transaction.on_commit(lambda: send_account_welcome_email(user.id))` —
+отложено до момента, когда транзакция, создавшая строку, реально
+закоммитится, так что приветственное письмо никогда не может уйти для
+регистрации, которая была откачена. Выдаёт свежую пару
+`RefreshToken.for_user(user)` напрямую (не вызывая сериализатор логина),
+так что регистрация сразу логинит пользователя без второго запроса.
+
+**`ChangePasswordAPIView`** (`IsAuthenticated`): валидирует через
+`ChangePasswordSerializer`, затем сам проверяет
+`request.user.check_password(current_password)` (у сериализатора нет
+доступа к `request.user`), прежде чем вызвать
+`serializer.save(user=user)`.
+
+**Сброс пароля — `PasswordResetRequestAPIView`/
+`PasswordResetConfirmAPIView`** (оба `AllowAny`, throttle сброса
+пароля): пара, исправленная в [[P0-04]] (в `docs/fixes-2026-09.md`).
+- **Запрос**: опциональная капча, `PasswordResetRequestSerializer`,
+  затем ищет пользователя по `email__iexact`. **Если пользователь
+  существует, но `is_active` равно `False`, код возвращает локальную
+  переменную `user` обратно в `None`** — тот же самый общий ответ
+  (`"If an account with that email exists, a password reset link has
+  been sent."`) возвращается в обоих случаях, и письмо не отправляется
+  для деактивированного случая, так что этот эндпоинт нельзя
+  использовать, чтобы прощупать, принадлежит ли данный email удалённому
+  аккаунту. Собирает ссылку сброса инлайново
+  (`{FRONTEND_URL}/reset-password/{uidb64}/{token}/`, используя
+  `default_token_generator` Django — тот же механизм токенов, который
+  **не** использует SimpleJWT; это отдельный, stateless, ограниченный
+  по времени подписанный токен, не JWT) и отправляет её через обычный
+  вызов `send_mail` с инлайновым телом-f-строкой — **не** через шаблон
+  (`templates/emails/accounts/password_reset.txt` существует на диске,
+  но никогда ничем не рендерится, судя к находке «Бэкенд — шаблоны
+  писем» руководства по фронтенду).
+- **Подтверждение**: декодирует `uidb64` (любое исключение → общий
+  ответ `{"detail": "Invalid or expired reset link."}`), ищет
+  пользователя по декодированному pk, проверяет токен через
+  `default_token_generator.check_token`, и — фикс [[P0-04]] — **если
+  `not user.is_active`, отказывает с этим же самым общим ответом**, ещё
+  до того, как вообще трогать пароль. Только пройдя этот барьер, он
+  делает `set_password`+сохранение. До этого фикса этот view безусловно
+  ставил `is_active=True; deleted_at=None` при успешной проверке
+  токена, то есть одно только «забыл пароль» могло реактивировать
+  деактивированный аккаунт вообще без проверки окна восстановления —
+  см. запись [[P0-04]] в `docs/fixes-2026-09.md` за полной историей,
+  включая тест, который раньше закреплял старое поведение как
+  намеренное (`test_confirm_reset_reactivates_deactivated_account`, с
+  тех пор удалён).
+
+**Восстановление аккаунта — `AccountRestoreRequestAPIView`/
+`AccountRestoreConfirmAPIView`** (оба `AllowAny`, throttle
+восстановления). Ни один не использует сериализатор вообще — оба читают
+`request.data` напрямую с ручными вызовами `str(...).strip()`, в
+отличие от любого другого view в этом файле.
+- **Запрос**: ищет пользователя; общий ответ
+  (`_generic_restore_message()`) покрывает «нет такого пользователя»,
+  «пользователь уже активен» (нечего восстанавливать) и «пользователь
+  был удалён больше `RESTORE_WINDOW_DAYS` дней назад» (логируется через
+  `logger.info("account_restore_expired ...")` перед возвратом того же
+  общего текста) — три разных причины для «ничего не происходит», один
+  неразличимый ответ, намеренно (так что эндпоинт нельзя использовать
+  для снятия отпечатка состояния аккаунта). Только если пользователь
+  неактивен *и* всё ещё внутри окна, он строит ссылку восстановления и
+  делает `transaction.on_commit` для письма.
+- **Подтверждение**: эндпоинт, который изменил [[P1-17]] (в
+  `docs/fixes-2026-09.md`). `new_password` здесь опционален (в отличие
+  от сброса пароля) — восстановление без установки нового пароля —
+  валидная форма запроса, поскольку у аккаунта теоретически может быть
+  ещё пригодный хеш пароля с момента до деактивации... **но на самом
+  деле никогда не бывает**, потому что `mark_deleted()` всегда вызывает
+  `set_unusable_password()` (см. `models.py` выше) — так что на
+  практике восстановление без `new_password` оставляет аккаунт
+  `is_active=True`, но **без пароля, которым кто-либо может
+  залогиниться**, и клиенту после этого понадобится отдельный запрос
+  сброса пароля. Если `new_password` **дан**, он прогоняется через
+  `validate_password` Django (фикс [[P1-17]] — раньше была только
+  голая проверка `len(new_password) < 8`), и любой сбой возвращает
+  `{"new_password": [...]}` с `400`, в **той же форме**, что и
+  эквивалентный сбой `PasswordResetConfirmAPIView`. Та же проверка окна
+  `deleted_at`, что и у view запроса. При успехе: единый блок
+  `transaction.atomic()` ставит `is_active=True`, `deleted_at=None`,
+  опционально новый пароль, и сохраняет — это инлайновый дубликат
+  `User.restore()`, упомянутый в «На что обратить внимание» у
+  `models.py`.
+
+**`ProfileAPIView`** (`IsAuthenticated`): `GET` делает `get_or_create`
+для `UserProfile` и возвращает плоский словарь из девяти snake_case
+ключей (см. запись про `ProfileSerializer` в `serializers.py` выше за
+историей [[P1-04]]). `PUT` валидирует через
+`ProfileSerializer(partial=True)`, затем, в одном блоке
+`transaction.atomic()`: условно обновляет `User.first_name`/
+`last_name`/`email` (только те ключи, которые реально присутствуют в
+провалидированных данных — `if "first_name" in v:`, а не
+`if v.get("first_name"):`, так что явная пустая строка **действительно**
+перезаписывает существующее значение, но пропущенный ключ никогда не
+трогает поле) с единственным `user.save(update_fields=...)`,
+защищённым `try/except IntegrityError` (дублирующийся email → `400`
+`"This email is already in use."`), затем тот же паттерн поле-за-полем
+для каждого поля `UserProfile`, затем один `profile.save()`. Возвращает
+ту же форму, что и `GET`, вложенную в `{"message": ..., "profile":
+{...}}`.
+
+**`DeleteAccountAPIView`** (`IsAuthenticated`): требует явное тело
+`{"confirm": true}` (любое ложное значение → `400`). Внутри одного
+блока `transaction.atomic()`: ставит `is_active=False`,
+`deleted_at=now()`, `set_unusable_password()` (те же три поля, что
+ставит `mark_deleted()` — но, как и у view подтверждения
+восстановления, это снова **инлайнится**, а не вызывает
+`user.mark_deleted()`), очищает каждое поле адреса `UserProfile` до
+`""` через единственный вызов `.update(...)` (не fetch-mutate-save —
+так что это не трогает `auto_now` у `updated_at`... **unverified**,
+поскольку `.update()` по умолчанию обходит `auto_now`, если поле не
+включено явно, а этот вызов этого не делает), строит URL восстановления,
+если у пользователя есть email в записи, и делает `transaction.on_commit`
+для письма о деактивации (только если `email` истинен — условное
+выражение внутри lambda, а не отдельный `if` перед тем как вообще
+запланировать `on_commit`).
+
+**С чем взаимодействует:** каждый сериализатор в
+`accounts/serializers.py`, кроме `CustomTokenObtainPairSerializer`
+(используется классом view напрямую, не вызывается вручную),
+`accounts/models.py` (`UserProfile`; `User` через `get_user_model()`),
+`accounts/emails.py` (все три отправителя), `default_token_generator`/
+`urlsafe_base64_encode`/`urlsafe_base64_decode` Django (токены ссылок
+сброса/восстановления), `RefreshToken` SimpleJWT. Фронтенд:
+`api/auth.ts` (`loginUser`, `registerUser`, `requestAccountRestore`,
+`confirmAccountRestore`), `api/account/ChangePassword.ts`
+(`changePassword` — хотя сам `components/PasswordChange.tsx` вызывает
+`api.post` напрямую вместо этой обёртки, судя по собственной находке
+руководства по фронтенду), `components/PasswordResetConfirm.tsx`,
+`view/Dashboard.tsx` (GET/PUT профиля, удаление аккаунта).
+
+**На что обратить внимание:**
+- Дублирующиеся классы throttle (см. выше) означают, что изменение,
+  скажем, имени scope `password_reset_anon` пришлось бы вносить в
+  **двух** файлах (`accounts/throttles.py` и здесь), чтобы оно реально
+  было согласованным, хотя нагрузку несёт только копия в этом файле.
+- `AccountRestoreRequestAPIView`/`AccountRestoreConfirmAPIView` —
+  единственные два view в этом приложении, полностью пропускающие класс
+  `Serializer` — каждый шаг валидации/нормализации (`.strip()`,
+  `.lower()`, `validate_password`) написан вручную инлайново, поэтому
+  `PasswordResetConfirmSerializer` существует как *отдельный,
+  неиспользуемый для восстановления* сериализатор, хотя его форма
+  (`uidb64`, `token`, `new_password`, `confirm_password`) почти
+  идентична тому, что подтверждение восстановления читает вручную —
+  поток восстановления мог бы переиспользовать его (минус
+  `confirm_password`, который восстановление не запрашивает), но не
+  делает этого.
+- Вызов очистки профиля `.update(...)` у `DeleteAccountAPIView`
+  работает в той же транзакции, что и собственный
+  `save(update_fields=[...])` строки `User` — но использует `.update()`
+  queryset Django, а не методы экземпляра ORM, используемые везде в
+  остальной части этого файла, поэтому он не бампает (и не может, если
+  ему не сказать) `UserProfile.updated_at`.
+
+**Вопросы для интервью:**
+- *В: Почему `PasswordResetRequestAPIView` возвращает локальную
+  переменную `user` в `None` для деактивированного аккаунта вместо
+  просто добавления охранного `if user.is_active:` вокруг блока
+  отправки письма?* — Оба варианта дали бы один и тот же результат «нет
+  отправленного письма», но установка `user = None` заставляет
+  остальную часть функции работать с одной проверкой `if user:` —
+  ей уже приходится обрабатывать «нет такого email» так же, так что
+  сворачивание «деактивирован» в то же состояние `None` означает, что
+  существует ровно одна ветка, решающая, отправлять ли письмо, а не две
+  отдельных условия, которые обе должны независимо согласиться не
+  отправлять.
+- *В: `AccountRestoreConfirmAPIView` позволяет восстановление без
+  `new_password`. Какой пароль на самом деле имеет аккаунт после этого,
+  учитывая поведение `mark_deleted()`?* — Никакого, которым можно
+  залогиниться — `mark_deleted()` всегда вызывает
+  `set_unusable_password()`, так что аккаунт, восстановленный без
+  указания нового пароля, возвращается `is_active=True`, но с
+  непригодным хешем пароля; клиенту после этого понадобится пройти
+  `PasswordResetRequestAPIView`/`Confirm` (что, после [[P0-04]], теперь
+  снова корректно работает, как только аккаунт активен), чтобы на самом
+  деле иметь возможность залогиниться.
+- **Более сложный вопрос:** *В: И `PasswordResetConfirmAPIView`, и
+  `AccountRestoreConfirmAPIView` теперь запускают `validate_password` на
+  новом пароле ([[P0-04]] и [[P1-17]] соответственно, в
+  `docs/fixes-2026-09.md`). `UserAttributeSimilarityValidator` Django —
+  один из валидаторов в `AUTH_PASSWORD_VALIDATORS` в
+  `tresse/settings.py` — обычно сравнивает новый пароль с собственным
+  email/именем пользователя, чтобы поймать что-то вроде использования
+  своего email в качестве пароля. Получает ли хоть одна из этих двух
+  точек вызова это сравнение на самом деле?* — Нет — обе вызывают
+  модульную функцию `validate_password(value)` из
+  `django.contrib.auth.password_validation` **без аргумента `user`**, а
+  это та же сигнатура, что используют и `RegisterSerializer`, и
+  `ChangePasswordSerializer`. Без переданного `user`
+  `UserAttributeSimilarityValidator` не с чем сравнивать и фактически
+  не срабатывает именно для этой проверки (остальные валидаторы —
+  минимальная длина, список распространённых паролей, полностью
+  числовой — работают как обычно, поскольку ни одному из них не нужен
+  объект пользователя). Это согласовано по всем путям установки пароля
+  в этом приложении, не пробел, уникальный для восстановления/сброса,
+  но это означает, что «не позволяй клиенту установить свой собственный
+  email в качестве пароля» сегодня нигде в этом коде на самом деле не
+  обеспечено.
+
+### `accounts/tests.py`
+
+730 строк, без библиотеки фабрик — каждый тест строит пользователей
+напрямую через локальный хелпер `_make_user(email, **kwargs)` (по
+умолчанию: телефон `"1234567890"`, пароль `"testpass123"`, имя
+`"Test User"`) и хелпер `_make_token_link(user)`, который в точности
+повторяет, как `default_token_generator`+`urlsafe_base64_encode`
+строят реальную ссылку сброса/восстановления, так что тесты могут
+собрать валидную пару `(uidb64, token)`, не проходя через настоящую
+отправку письма. `cache.clear()` работает в `setUp()` каждого API-теста
+— необходимо, потому что классы throttle здесь ключуют свои бакеты
+ограничения частоты в бэкенде кэша Django, и оставшийся бакет от более
+раннего теста в том же прогоне иначе привёл бы к падению несвязанного
+более позднего теста с `429`, которого он не ожидает.
+
+**Что мокается, по областям:**
+- `_verify_recaptcha` патчится на `return_value=True` в каждом тесте,
+  который затрагивает эндпоинт, защищённый капчей (регистрация, запрос
+  сброса пароля, запрос восстановления) — ни один из них на самом деле
+  не достигает эндпоинта `siteverify` Google; сам барьер
+  `_recaptcha_enabled()` (`DEBUG` или не настроен секретный ключ →
+  отключено) в тестовых настройках и так уже пропустил бы реальный
+  вызов, так что эти патчи в основном подстраховка/самодокументирование,
+  а не строго несущая нагрузку вещь (**unverified** без прямой проверки
+  значений `RECAPTCHA_SECRET_KEY`/`DEBUG` в
+  `tresse/settings_test.py` в этом проходе).
+- `send_mail`, `send_account_deleted_email`, `send_account_restore_email`,
+  `send_account_welcome_email` каждая мокается в точке вызова
+  соответствующего теста — ни один тест в этом файле не даёт реальной
+  попытке письма достичь настроенного `EMAIL_BACKEND` Django.
+- Два теста рендера шаблонов писем
+  (`AccountEmailTemplatesRenderTestCase`) — единственное исключение —
+  они вызывают `render_to_string` по-настоящему, именно для
+  `welcome.txt` и `account_deactivated.txt` (не для
+  `account_restore.txt`, поэтому сломанное имя файла этого шаблона,
+  задокументированное в разделе шаблонов писем руководства по
+  фронтенду, невидимо для этого набора тестов).
+
+**Что утверждается, по областям — организовано вокруг того, что каждая
+группа тестов существует закрепить, а не построчный список:**
+- **`UserManagerTestCase`**: три `ValueError` для обязательных полей,
+  нормализация email, хеширование пароля, дефолты флагов суперюзера.
+- **`UserSoftDeleteTestCase`**: `mark_deleted()`/`restore()` на уровне
+  модели напрямую — переходы `is_active`/`deleted_at`/пригодности
+  пароля в обоих направлениях, независимо от какого-либо HTTP-view.
+- **Юнит-тесты сериализаторов** (`RegisterSerializerTestCase`,
+  `ChangePasswordSerializerTestCase`): отклонение дубликата email,
+  отклонение слабого пароля, несовпадение паролей — выполняется
+  конструированием сериализатора напрямую, вообще без `APIClient`.
+- **`RegisterAPITestCase`/`LoginAPITestCase`/`ChangePasswordAPITestCase`**:
+  обычные успешные/неуспешные пути через реальные эндпоинты, плюс по
+  одному тесту на два сквозных момента, важных здесь больше всего —
+  деактивированный аккаунт не может залогиниться
+  (`test_login_deactivated_account_rejected`), а сбой рекапчи
+  блокирует регистрацию до создания строки пользователя.
+- **`PasswordResetFlowTestCase`**: именно здесь фикс [[P0-04]]
+  закреплён напрямую — `test_request_reset_for_deactivated_account_sends_no_email`
+  и `test_confirm_reset_for_deactivated_account_is_refused` (последний
+  также утверждает, что хеш пароля аккаунта **побайтово неизменён**
+  после отклонённой попытки, а не только что ответ был `400`), сидят
+  прямо рядом с обычными тестами потока, к которым они были добавлены,
+  заменяя один тест
+  (`test_confirm_reset_reactivates_deactivated_account`), который
+  раньше утверждал *старое*, уязвимое поведение как правильное.
+- **`AccountDeleteAndRestoreFlowTestCase`**: самый большой отдельный
+  класс тестов в этом файле. Покрывает деактивацию, очищающую профиль;
+  запрос восстановления, отправляющий письмо только для
+  деактивированного аккаунта внутри окна, и молчащий для активного
+  аккаунта или для того, что вышел за `RESTORE_WINDOW_DAYS` (напрямую
+  меняя `deleted_at`, чтобы симулировать истёкший случай, а не мокая
+  `timezone.now()`); подтверждение восстановления, реактивирующее при
+  валидном токене и отклоняющее за пределами окна; и — регрессионные
+  тесты [[P1-17]] — распространённый пароль (`"password123"`) и
+  полностью числовой (`"48151623"`), каждый отклонён с конкретным
+  сообщением валидатора Django, всплывающим в
+  `resp.data["new_password"]`, рядом с одним тестом, подтверждающим,
+  что действительно сильный пароль (`"Zx9-plum-Harbor-42"`) всё ещё
+  успешно восстанавливает аккаунт.
+- **`ProfileAPITestCase`**: `GET`, автоматически создающий профиль;
+  `PUT` с использованием **точно такой же формы payload**, которую
+  отправляет `mapFormToApi` из `Dashboard.tsx` (комментарий в тесте так
+  прямо и говорит), с последующим round-trip через `GET`, чтобы
+  подтвердить, что каждое поле сохранилось; `PUT` без `email` (зеркалит
+  то, что `mapFormToApi` пропускает ключ, когда поле пусто), оставляющий
+  существующий email нетронутым, а не очищающий его; `PUT` с
+  дублирующимся email, возвращающий `400`.
+
+**Вопрос для интервью:** *В:
+`test_confirm_reset_for_deactivated_account_is_refused` утверждает, что
+хеш пароля пользователя не изменён, а не только что HTTP-ответ был
+`400`. Почему это дополнительное утверждение имеет значение, учитывая,
+что view уже возвращает статус ошибки?* — Один только ответ `400` не
+доказывает, что в базу данных ничего не записано — баг мог бы вернуть
+правильный код статуса, всё ещё вызвав `set_password`/`save` до
+проверки, которая должна была это заблокировать (например, если бы
+проверка `is_active` случайно оказалась после кода, устанавливающего
+пароль, а не до него); утверждение, что сохранённый хеш побайтово
+идентичен тому, каким он был до запроса, — единственный способ
+на самом деле доказать, что отказ произошёл **до** какой-либо мутации,
+а не просто что итоговый ответ выглядел как отказ.
+
+---
+
+## Бэкенд — товары (products)
+
+Самое большое приложение в этом бэкенде: каталог товаров, размеры/склад,
+изображения, корзина, вишлист, подписки на возврат в наличии и журнал
+отправленных писем. Несколько файлов фронтенда вызывают его напрямую
+(`api/products.ts`, `store/serverCartSlice.ts`, `store/wishListSlice.ts`,
+`view/ProductCatalog.tsx`, `view/ProductDetails.tsx`, `view/WishList.tsx`;
+перетаскивание порядка в `ProductAdmin` — это отдельный, админский путь,
+не выставленный во фронтенде) — этот раздел даёт перекрёстную ссылку на
+каждый по пути, с той же планкой доказательности, что и остальная часть
+руководства.
+
+### `products/models.py`
+
+**Что это:** одиннадцать моделей: `Category`, `Collection`,
+`ProductGroup`, `Product`, `Size`, `ProductSize`, `ProductImage`,
+`ProductWishlist`, `StockSubscription`, `EmailLog`, `Cart`, `CartItem`,
+`Review`.
+
+**Как это работает, по моделям:**
+- **`Category`**/**`Collection`**: почти идентичная форма (`name`,
+  уникальный `slug`) — две отдельные таксономии, к которым может
+  принадлежать товар: ровно одна `Category` (FK,
+  `on_delete=SET_NULL`) и любое число `Collection` (`ManyToManyField`).
+  Карта алиасов `category` у `ProductFilter` (`women`/`men`/`kids` →
+  `woman`/`man`/`kids`, см. `filters.py` ниже) — единственное место,
+  где слаги категорий нормализуются против фиксированного словаря;
+  ничто на уровне модели не ограничивает, чем на самом деле является
+  `slug` у `Category`.
+- **`ProductGroup`**: механизм за «этот товар бывает пяти цветов» —
+  `Product` опционально принадлежит одной `ProductGroup`
+  (`on_delete=SET_NULL`), и каждый другой `Product` в той же группе
+  трактуется как её **цветовой вариант** (см.
+  `ProductColorVariantSerializer` ниже). Товар без группы фактически
+  является собственной группой из одного участника
+  (`ProductSerializer.get_variants` откатывается к
+  `Product.objects.filter(id=obj.id)`, когда `group_id` не установлен).
+- **`Product`**: центральная модель. `ReturnPolicy` (`TextChoices`:
+  `standard`/`final_sale`/`non_returnable_hygiene`) **снимается снимком
+  на каждый `OrderItem`** в момент оформления заказа
+  (`orders/views_stripe.py`, вне этого приложения) — это поле — живой,
+  редактируемый источник истины; снимок на прошлом заказе заморожен на
+  том, чем он был в момент оформления этого заказа, так что изменение
+  политики возврата товара сегодня никогда задним числом не меняет
+  право на возврат существующего заказа. На уровне товара существуют
+  два отдельных, **пересекающихся** булевых поля, связанных со складом:
+  `available` (устанавливается вручную, «должен ли этот товар вообще
+  показываться/продаваться») и `in_stock` (тоже вручную, на модели) —
+  но сериализаторы и фильтры никогда не читают `Product.in_stock`
+  напрямую; вместо этого они вычисляют собственный `in_stock` из
+  `ProductSize.quantity` (см. `ProductFilter.filter_in_stock` и
+  `ProductSerializer.get_in_stock` ниже) — `Product.in_stock`, само
+  поле, выглядит неиспользуемым ни в одном пути чтения, подтверждено
+  прямым поиском по коду (только когда-либо записывается, см. «На что
+  обратить внимание»). `allows_custom_sizing` — простой булев флаг **без
+  какого-либо соответствующего поля размеров/измерений на модели
+  вообще** — реальный механизм произвольного размера — это строка
+  `Size`, буквально названная `"CUSTOM SIZE"` (сравнение строк, не
+  смоделировано как отдельный тип — см. обработку произвольного размера
+  `ProductFilter` в других местах этого кода, и логику произвольной
+  длины `CartItemSerializer` ниже за *соседним* механизмом, который это
+  поле не контролирует). `allows_custom_length`/`custom_length_cm`/
+  `custom_length_surcharge` — поля, которые на самом деле важны для
+  серверного снимка `CartItemSerializer` (ниже) — `custom_length_cm` по
+  умолчанию `10`, `custom_length_surcharge` по умолчанию `35`
+  (фиксированная сумма в долларах, не процент). `Meta.ordering =
+  ("sort_order", "-created_at", "id")` — тот же трёхключевой порядок,
+  который `ProductViewSet` явно повторяет как собственный список
+  `ordering` (избыточно, но согласованно).
+- **`Size`**: просто уникальное `name` — без фиксированного перечня;
+  `"CUSTOM SIZE"`, `"ONE SIZE"` и каждый числовой/буквенный размер —
+  всё простые строки в этой же таблице, различаемые только сравнением
+  строк везде, где код должен выделить один из них
+  (`_normalize_size_label`/`CUSTOM_SIZE_LABEL` в
+  `orders/views_stripe.py`; обработка категорий в `products/filters.py`
+  не связана, но тот же паттерн «специальное значение через строковое
+  сравнение» повторяется по всему коду).
+- **`ProductSize`**: строка-связка `(product, size)`, которая на самом
+  деле несёт `quantity` — это и есть реальный складской учёт;
+  `Product.in_stock` и `Product.available` — более грубые, отдельные
+  флаги, которые из него автоматически не выводятся. **Несёт механизм
+  обнаружения восстановления «с нуля до положительного» прямо на
+  экземпляре**: `__init__` сохраняет
+  `self.__original_quantity = self.quantity` (имя искажено (mangled) до
+  `_ProductSize__original_quantity` Python-ом, поскольку префикс с
+  двумя подчёркиваниями написан внутри тела именно этого класса) для
+  только что **сконструированного** (не загруженного) экземпляра, а
+  переопределение classmethod `from_db` делает то же самое для
+  экземпляра, **загруженного** из базы данных — эти два пути кода
+  существуют потому, что один только `__init__` увидел бы только
+  значение, переданное в прямой вызов конструктора `ProductSize(...)`,
+  а не то, что реально было в строке, извлечённой из базы данных и
+  готовящейся к мутации+сохранению; `from_db` — задокументированный
+  хук Django именно для случая «мне нужно знать значение поля таким,
+  каким оно было прочитано из БД, до любых изменений в памяти».
+  Обработчик `post_save` в `products/signals.py` — единственный код,
+  читающий этот искажённый атрибут (см. ниже) — `unique_together =
+  ("product", "size")`.
+- **`ProductImage`**: `image` (обязательный `ImageField`, в отличие от
+  `Product.color_swatch_image`/`main_image`, оба из которых nullable) +
+  `alt_text`, `is_primary`, `sort_order`. `Meta.ordering =
+  ("sort_order", "id")` — тот же порядок, который
+  `get_product_main_image_url` (`serializers.py`) явно переприменяет
+  собственным вызовом `.order_by(...)`, а не полагается на этот дефолт
+  (защитно, поскольку `.first()` на уже по умолчанию упорядоченном
+  queryset вёл бы себя так же в любом случае — подстраховка, не баг).
+  Имеет собственное Python-свойство `@property` `image_url` (`try:
+  return self.image.url; except Exception: return ""`) — это **третья,
+  независимая** копия паттерна «защитить доступ к `.url`», также
+  реализованного в `get_product_main_image_url` у `serializers.py` и (в
+  рамках фикса «Catalog 500 on unguarded image URLs», `docs/fixes-2026-09.md`)
+  в `ProductImageSerializer.get_image_url` — **это свойство модели
+  никогда на самом деле не вызывается ни из `serializers.py`, ни из
+  `views.py`** (подтверждено grep-ом — сериализатор вместо этого
+  определяет и использует собственный метод `get_image_url`, дублируя,
+  а не делегируя этому свойству); его читает только
+  `ProductImageInline.preview` в `products/admin.py` (**другая**,
+  четвёртая защита, написанная независимо, а не вызывающая это свойство
+  — см. `admin.py` ниже).
+- **`ProductWishlist`**/**`StockSubscription`**: обе — простые модели в
+  стиле связки (`user`+`product`, и `product`+опциональный `user`+
+  `email` соответственно) с `unique_together`, предотвращающим
+  дублирующую строку — именно это делает `get_or_create` и в
+  `WishlistViewSet`/`ProductViewSet.wishlist`, и в
+  `subscribe_back_in_stock` (`views.py`, ниже) по-настоящему
+  идемпотентной операцией, а не просто той, которая на практике
+  случайно не дублируется. `StockSubscription.notified_at` — поле,
+  которое `products/signals.py` устанавливает, как только письмо
+  реально уходит — именно оно делает так, что подписчика уведомляют
+  только один раз за цикл восстановления, а не один раз на
+  размер/событие покупки.
+- **`EmailLog`**: обобщённая запись исходящей почты (варианты
+  `email_type` включают `back_in_stock`/`cart_reminder`/
+  `wishlist_reminder`/`password_reset`/`order_confirmation`/`other`),
+  записываемая через `send_email_with_log` из `products/emails.py` — но
+  **только три отправки, которые на самом деле проходят через этот
+  хелпер** (возврат в наличии, напоминание о корзине, напоминание о
+  вишлисте, все из этого же приложения), когда-либо создают здесь
+  строку; `password_reset` и `order_confirmation` перечислены как
+  валидные варианты `email_type`, но ничто в `accounts/` или `orders/`
+  никогда не импортирует и не вызывает `send_email_with_log` — эти два
+  варианта существуют в перечислении без единого пути кода, который бы
+  когда-либо произвёл строку с их использованием (**unverified**, было
+  ли это заделом на будущее для аудита, или остатком от времени до того,
+  как у этих двух приложений появились свои отдельные функции отправки).
+- **`Cart`**: один-к-одному с `User` (`related_name="cart"` — у
+  пользователя может быть не более одной корзины, обеспечено на уровне
+  БД самим `OneToOneField`). **`CartItem`**: строки заказа — см. запись
+  про `CartItemSerializer` в `serializers.py` (ниже) за самым важным
+  полем, снимком произвольной длины. `Meta.ordering = ("id",)` —
+  порядок вставки, не, например, по имени товара.
+- **`Review`**: `unique_together = ("product", "user")` — один отзыв на
+  пользователя на товар — но **нигде в этом бэкенде не выставлен
+  эндпоинт создания/списка для этой модели вообще**, подтверждено
+  поиском по всему репозиторию на `review`/`Review` за пределами
+  `products/models.py` и `products/admin.py` (только `ReviewAdmin` и
+  собственная история миграций этой модели на неё ссылаются). Список
+  разрешённых путей `accounts/middleware.py` даже явно проверяет
+  `/api/reviews` как всегда разрешённый анонимный путь (см. собственную
+  запись этого файла выше), но ни одно приложение в этом проекте не
+  определяет URL под этим путём — это по-настоящему недостижимый
+  черновик, фича, чья модель и админка были построены, но чей API либо
+  никогда не был написан, либо был удалён без изменения модели, админки
+  или списка разрешённых путей middleware, которые всё ещё на неё
+  ссылаются.
+
+**С чем взаимодействует:** `settings.AUTH_USER_MODEL` (`accounts.User`,
+через `Cart`/`ProductWishlist`/`StockSubscription`/`Review`). Читается
+по всему `products/serializers.py`, `views.py`, `admin.py`,
+`signals.py`, и через `orders/models.py`/`orders/views_stripe.py`
+(которые читают `Product`/`ProductSize`/`CartItem` напрямую при сборке
+заказа из оплаченной оформленной корзины — вне рамок этого раздела).
+
+**На что обратить внимание:**
+- **`Product.in_stock` и `Product.available` — оба поля, выставляемые
+  вручную, из которых ничего автоматически не выводится, а `in_stock`
+  конкретно выглядит только-на-запись во всех путях чтения, которые
+  нашёл этот раздел.** Админ мог бы переключить `Product.in_stock` в
+  `True` для товара с нулевым количеством `ProductSize` где угодно, и
+  каждый клиентский view (`ProductFilter.filter_in_stock`,
+  `ProductSerializer.get_in_stock`) всё равно корректно вычислит «нет в
+  наличии» из реальных строк `ProductSize` и полностью проигнорирует
+  флаг — поле не ошибочно, оно просто ни на что не влияет из того, что
+  видит клиент.
+- **Четыре независимых реализации «защити возможно кидающий исключение
+  доступ к `.url`»** существуют по этому коду для полей изображений:
+  `ProductImage.image_url` (этот файл, `@property` модели, не
+  используется сериализаторами), `get_product_main_image_url` и
+  `ProductImageSerializer.get_image_url`/
+  `ProductSerializer.get_color_swatch_url`/
+  `ProductColorVariantSerializer.get_color_swatch_url` (`serializers.py`,
+  те, что реально подключены к ответам API, три из которых требовали
+  фикса «Catalog 500 on unguarded image URLs»), и
+  `ProductImageInline.preview`/`ProductAdmin.color_preview`
+  (`admin.py`, только для админки). Ни одна из четырёх не вызывает
+  другую.
+- **Искажение имени `ProductSize.__original_quantity` — реальная
+  ловушка для наивного читателя или будущего рефакторинга.** Написание
+  `instance._ProductSize__original_quantity` в `signals.py` (другом
+  модуле) работает только потому, что искажение имён Python чисто
+  лексическое (основано на том, внутри тела какого класса написан
+  идентификатор с двумя подчёркиваниями, а не на каком-либо
+  контроле доступа во время выполнения) — собственный комментарий
+  `signals.py` говорит об этом прямо, но переименование приватного
+  атрибута в `models.py` без обновления захардкоженной искажённой
+  строки в `signals.py` молча сломало бы обнаружение восстановления
+  без единой ошибки (вызов `getattr(instance,
+  "_ProductSize__original_quantity", None)` просто всегда возвращал бы
+  дефолт `None`, который `notify_when_back_in_stock` трактует так же,
+  как «нет предыдущего значения для сравнения, не настоящее
+  восстановление» — так что режим отказа — это **молчаливое
+  недоуведомление**, а не падение).
+
+**Вопросы для интервью:**
+- *В: Почему `ProductSize` нужен и override `__init__`, и override
+  classmethod `from_db`, чтобы отслеживать исходное количество, а не
+  только один из них?* — `__init__` выполняется при каждом
+  конструировании экземпляра, включая свежий вызов
+  `ProductSize(...)`, который никогда не был загружен из базы данных
+  (например, внутри формы «добавить новый» `ProductSizeInline`) — для
+  этого случая нет вообще никакого «исходного» значения из БД, о
+  котором можно говорить, так что текущее `self.quantity` в момент
+  конструирования — ближайшее приближение. `from_db` — хук Django
+  именно для «этот экземпляр только что материализован из строки базы
+  данных» — у него есть доступ к реальным значениям полей, как они
+  хранятся, а это как раз то, что нужно обработчику сигнала для
+  сравнения после мутации в памяти и `.save()`. Без `from_db`,
+  `Product.objects.get(...)`, за которым следует
+  `instance.quantity = 5; instance.save()`, не имел бы никакой
+  надёжной записи о том, каким было количество *до* этого присвоения.
+- *В: `Product.ReturnPolicy` снимается снимком на `OrderItem` при
+  оформлении заказа. Проследите, что происходит, если политика возврата
+  товара меняется со `standard` на `final_sale` на следующий день после
+  того, как заказ клиента был отправлен.* — Для этого существующего
+  заказа ничего не меняется — `orders/views_stripe.py` копирует
+  `product.return_policy` в строку `OrderItem` в момент создания заказа
+  из оплаченной сессии оформления, и каждая проверка права на возврат
+  дальше по цепочке (`RequestReturnAPIView` в `orders/views.py`,
+  `approve_return` в `orders/admin.py`) читает этот замороженный
+  `OrderItem.return_policy`, никогда не `Product.return_policy` вживую
+  — изменение политики затрагивает только заказы, размещённые **после**
+  изменения.
+- **Более сложный вопрос:** *В: Два одновременных запроса оба вызывают
+  `ProductSize.objects.get(pk=X)`, оба видят `quantity=0`, и оба затем
+  ставят `quantity=5` и сохраняют — есть ли гонка, при которой
+  уведомление о восстановлении могло бы сработать дважды, по разу на
+  запрос?* — Оба вызова `from_db` независимо фиксируют
+  `previous_quantity=0` для своего собственного экземпляра в памяти,
+  так что **да**, оба сохранения независимо удовлетворили бы
+  `previous_quantity == 0 and instance.quantity > 0`, и каждый вызвал бы
+  `transaction.on_commit` у `notify_when_back_in_stock` — у самого
+  обработчика сигнала нет блокировки. На практике реальную защиту от
+  двойной отправки письма подписчику даёт `StockSubscription.notified_at`:
+  каждый из двух вызовов сигнала независимо запрашивает
+  `StockSubscription.objects.filter(product=product,
+  notified_at__isnull=True)`, и (не считая второй гонки за саму запись
+  `notified_at`, которая здесь тоже не защищена
+  `select_for_update`) первый, кто реально выполнит свой
+  `sub.save(update_fields=["notified_at"])`, побеждает; собственный цикл
+  второго вызова всё равно запросил бы список подписок **до** того, как
+  первый записал `notified_at` (оба запроса могут выполниться до
+  любого из сохранений, поскольку ни один не заблокирован), так что при
+  реальной конкурентности настоящая двойная отправка возможна — эта
+  конкретная гонка **unverified** против реального конкурентного теста
+  в `StockSignalTestCase` у `products/tests.py`, который тестирует
+  только последовательные сохранения.
+
+### `products/migrations/`
+
+Двадцать три миграции. В общих чертах: `0001_initial` создаёт базовую
+форму каталога; `0002`–`0004` — чистые миграции данных (`RunPython`),
+заполняющие строки `Size`, начальный каталог товаров и строку `"ONE
+SIZE"` — ни одна не трогает схему. `0005`/`0015` добавляют, а затем
+снова добавляют `Product.main_image` (её ненадолго убрала `0014`, а
+вернула `0015` — реальные туда-обратно, не опечатка в этом резюме).
+`0006`/`0007` добавляют и заполняют `Category.slug`. `0008`/`0009`
+добавляют два индекса, а затем убирают их же одной миграцией позже.
+`0010` создаёт `ProductWishlist`/`StockSubscription`. `0012` добавляет
+`Collection` и поля `color_swatch_image`/`color_name`/`color_hex`
+(позже свёрнуто в более полную форму цветового варианта/`ProductGroup`
+в `0016` — модель в том виде, как она читается сегодня). `0013`/`0014`
+— большие зачистки `AlterModelOptions`/`AlterUniqueTogether` (порядок и
+чистка ограничений сразу по нескольким моделям) — `0014` также убирает
+`main_image` (см. выше) и добавляет `care_instructions`/
+`Product.in_stock`/`StockSubscription.notified_at`. `0017` добавляет
+`EmailLog`. `0018`/`0023` добавляют семь полей произвольных измерений
+`CartItem` и, отдельно, поля произвольной длины — в двух разных
+миграциях, несмотря на то что оба набора — «произвольные X»-поля на
+одной и той же модели, потому что `allows_custom_length` вышла позже,
+чем поля измерений бюста/талии/бёдер. **`0019` стоит выделить отдельно**:
+она убирает `unique_together` у `CartItem` (добавленное одной миграцией
+раньше, в `0018`) обратно до отсутствия ограничения вообще — именно
+*поэтому* `CartItemSerializer._get_other_cart_quantity` (ниже) должна
+суммировать количество по **нескольким** строкам `CartItem` для одной и
+той же пары `(cart, product_size)`, а не может предполагать, что
+существует максимум одна строка; без `0019` эта суммирующая логика была
+бы мёртвым кодом, защищающим от случая, который сама база данных не
+допустила бы. `0020`–`0022` добавляют `sort_order`, затягивают порядок
+`Product` по умолчанию и добавляют `return_policy`.
+
+### `products/apps.py` и `products/signals.py`
+
+**Что это, вместе:** весь механизм уведомления о возврате в наличии —
+`ProductsConfig.ready()` в `apps.py` — **единственное** место, откуда
+когда-либо импортируется `signals.py` (`from . import signals  #
+noqa: F401`, внутри `ready()`), а именно это на самом деле подключает
+декоратор `@receiver` в `signals.py` к диспетчеру сигналов Django; без
+этого импорта декорация `@receiver(post_save, sender=ProductSize)` в
+`signals.py` просто никогда не выполнилась бы, и весь механизм был бы
+молча неактивен — это, собственно, и был баг [[P0-01]] (в
+`docs/fixes-2026-09.md`): функция-обработчик сигнала существовала и была
+написана корректно, но ничто никогда не импортировало модуль, где она
+определена, так что ни одно письмо о восстановлении никогда не
+отправлялось, ни для одного товара, никогда, пока не добавили этот хук
+`ready()`.
+
+**Как работает `notify_when_back_in_stock`, шаг за шагом:**
+1. Читает `instance._ProductSize__original_quantity` (искажённый
+   атрибут, который установили `__init__`/`from_db` в `models.py` — см.
+   собственное «На что обратить внимание» этого файла про само
+   искажение имени) как `previous_quantity`, по умолчанию `None`, если
+   он каким-то образом отсутствует.
+2. **Сразу же перезаписывает его** только что сохранённым
+   `instance.quantity` — так что если этот же экземпляр в памяти будет
+   сохранён снова позже в том же запросе/процессе без повторной
+   загрузки из БД, *следующее* срабатывание `post_save` сравнит с
+   значением *этого* сохранения, не с исходным значением до любого из
+   сохранений. Именно это делает различение «настоящее восстановление
+   с нуля до положительного, не уменьшение при покупке, не
+   редактирование админом, не пересекающее ноль» действительно верным
+   для нескольких сохранений одного экземпляра, не только для первого.
+3. `if instance.quantity <= 0: return` — нет уведомления для
+   сохранения, оставляющего запас на нуле или ниже (поле —
+   `PositiveIntegerField`, так что отрицательное на практике
+   недостижимо, но проверка этого не предполагает).
+4. `if previous_quantity is None or previous_quantity > 0: return` —
+   это защита [[P0-02]] (в `docs/fixes-2026-09.md`): до её появления
+   **каждое** сохранение, оставляющее количество положительным,
+   уведомляло бы, включая товар, переходящий с `quantity=3` на
+   `quantity=5` (обычное пополнение запаса без какого-либо перехода
+   «было недоступно, а теперь доступно», важного для подписчика), или
+   даже покупку, уменьшающую с `5` до `4` (что, до фикса, судя по всему,
+   всё ещё могло удовлетворять тому, чем было исходное условие —
+   документация фиксов — авторитетный источник за точной формой бага
+   до фикса; этот раздел описывает **текущее** условие, как оно
+   читается из кода). `previous_quantity is None` также важен для
+   только что **созданной** строки (через inline-форму в админке или
+   скрипт) — для `ProductSize`, впервые вставляемого, скажем, с
+   `quantity=5`, «предыдущего» значения вообще нет; этот случай явно
+   трактуется как *не* восстановление (ни один подписчик не мог бы
+   подписаться на размер, которого ещё не существовало).
+5. Запрашивает `StockSubscription.objects.filter(product=product,
+   notified_at__isnull=True)` — каждый подписчик на **товар** (не на
+   конкретный `ProductSize`/размер, который восстановился — подписка
+   привязана к товару, не к размеру, так что клиент, подписавшийся,
+   пока, скажем, Medium был не в наличии, получит уведомление, когда
+   восстановится Small, даже если Medium всё ещё на нуле).
+6. `if not subscriptions.exists(): return` — запрос лишь для того,
+   чтобы прерваться раньше, чем строить URL товара и замыкание
+   `transaction.on_commit`, избегая этой подготовительной работы для
+   (предположительно частого) случая восстановления без ожидающих
+   подписчиков.
+7. Строит `product_url` один раз, вне замыкания, затем определяет
+   `_send_after_commit()` — цикл по подпискам, каждая итерация обёрнута
+   в собственный `try/except Exception: logger.exception(...)`, так что
+   сбой письма у одного подписчика (плохой адрес, временная ошибка
+   SMTP) не останавливает обработку остальных из списка. Каждый успех
+   ставит `sub.notified_at = timezone.now()` и сохраняет **немедленно**,
+   внутри цикла, не пакетно в конце — так что сбой посреди длинного
+   списка подписчиков оставляет уже успешных корректно отмеченными, и
+   только остаток остаётся годным для будущей повторной попытки (в этом
+   коде нет механизма повтора; «годный для будущей повторной попытки»
+   означает «в следующий раз, когда именно этот товар снова пересечёт
+   ноль-к-положительному», а не автоматическую повторную попытку).
+8. Всё замыкание планируется через `transaction.on_commit`, а не
+   выполняется инлайново — так что если сохранение, вызвавшее этот
+   сигнал, само откатывается (часть более крупной неудавшейся
+   транзакции где-то ещё), письмо никогда не отправляется для
+   изменения запаса, которое на самом деле так и не сохранилось.
+
+**С чем взаимодействует:** `products/emails.py`
+(`send_back_in_stock_email`), `products/models.py` (`ProductSize`,
+`StockSubscription`). Фронтенд: ничто не вызывает это напрямую — оно
+целиком запускается сервером, любым путём кода, который сохраняет
+`ProductSize` с более высоким количеством (редактирование в админке
+через `ProductSizeInline`, или — за пределами этого приложения —
+уменьшение запаса вебхуком Stripe в `orders/views_stripe.py` при
+покупке, что является уменьшением и само по себе никогда не является
+триггером).
+
+**На что обратить внимание:** согласно «Более сложному вопросу» для
+интервью в разделе `models.py` выше, у этого обработчика **нет явной
+блокировки** ни вокруг сравнения при обнаружении восстановления, ни
+вокруг гонки за запись `notified_at` между конкурентными сохранениями
+одного и того же `ProductSize` — на практике настоящее одновременное
+двойное сохранение именно этой строки размера — узкое окно
+(редактирование запаса админом вручную одновременно с... самим собой,
+или с собственным уменьшением от покупки, приземляющимся в тот же
+момент на ту же строку, что является уменьшением и само по себе не
+вызвало бы этот путь), так что теоретический риск двойного уведомления
+реален, но не самый вероятный режим отказа, который у этого механизма
+уже был (это были [[P0-01]]/[[P0-02]], оба про то, что обработчик
+никогда не срабатывал или срабатывал слишком охотно, не про то, что
+срабатывал дважды).
+
+**Вопросы для интервью:**
+- *В: Почему `try/except` цикла по подписчикам находится **внутри**
+  цикла, на подписку, а не один `try/except` вокруг всей функции
+  `_send_after_commit`?* — Так, чтобы один плохой адрес email или один
+  временный сбой отправки не прерывал всю партию — с `try/except` на
+  каждую итерацию список из десяти подписчиков, где третий не удался,
+  всё равно успешно уведомляет (и ставит `notified_at`) остальным
+  девяти; один внешний `try/except` остановился бы на первом сбое и
+  оставил бы неуведомлёнными подписчиков с четвёртого по десятого, даже
+  если с их собственными адресами всё было в порядке.
+- *В: Что произошло бы, если бы метод `ready()` в `apps.py` был удалён
+  полностью, а `signals.py` остался полностью без изменений?* — Именно
+  баг [[P0-01]]: декоратор `@receiver` у `signals.py` вступает в силу,
+  только когда модуль, его содержащий, где-то реально импортируется
+  Django — без импорта нигде строка декоратора никогда не выполняется,
+  никакой сигнал не подключается, вызовы `ProductSize.save()`
+  продолжаются совершенно нормально без побочного эффекта, и письмо о
+  возврате в наличии никогда не отправляется ни для одного товара, без
+  единой ошибки, предупреждения или какого-либо другого видимого
+  симптома — весь код по отдельности выглядит корректным, что как раз
+  и делает этот класс бага легко пропустить без теста, который реально
+  прогоняет `.save()` через настоящий реестр приложений Django (что и
+  делает `StockSignalTestCase`, используя `TestCase` и реальную
+  конфигурацию приложения).
+- **Более сложный вопрос:** *В: Все тесты в `StockSignalTestCase`
+  оборачивают вызывающее `.save()` в
+  `self.captureOnCommitCallbacks(execute=True)`. Что на самом деле
+  наблюдал бы каждый из этих тестов, если бы эту обёртку убрали?* —
+  Колбэки `transaction.on_commit` откладываются до реального коммита
+  охватывающей транзакции — `TestCase` Django оборачивает каждый
+  тестовый метод в транзакцию, которая откатывается в конце (для
+  изоляции между тестами), так что без `captureOnCommitCallbacks`
+  `_send_after_commit` **никогда бы не выполнилась** во время теста
+  вообще (тот «коммит», которого она ждёт, внутри `TestCase` никогда не
+  случается), и каждое утверждение, проверяющее
+  `mock_send.assert_called_once()`/`notified_at is not None`, упало бы
+  — не потому, что логика сигнала неверна, а потому, что собственная
+  транзакционная изоляция тестового каркаса молча помешала бы отложенному
+  колбэку когда-либо сработать.
+
+### `products/throttles.py`
+
+`StockSubscribeAnonThrottle`/`StockSubscribeUserThrottle` — два класса,
+`scope = "stock_subscribe_anon"`/`"stock_subscribe_user"`. Используются
+только `ProductViewSet.subscribe_back_in_stock` (`views.py`, ниже). В
+отличие от `accounts/throttles.py`, дублирующей копии этих классов
+больше нигде в этом приложении нет.
+
+### `products/filters.py`
+
+**Что это:** `ProductFilter(django_filters.FilterSet)` —
+`filterset_class`, который используют и `ProductViewSet`, и
+`WishlistViewSet`.
+
+**Как это работает:** `category` (`CharFilter` с кастомным `method`, не
+прямое совпадение поля) принимает слаг **или** один из фиксированной
+карты алиасов (`women`/`womens`/`woman` → `woman`; `men`/`mens`/`man` →
+`man`; `kid`/`kids` → `kids`), приводимый к нижнему регистру и
+обрезаемый до поиска — регистронезависимо (`iexact`) против
+`Category.slug`. `available` (`BooleanFilter`, прямое поле). `in_stock`
+(`BooleanFilter` с кастомным `method`): строит подзапрос
+`Exists(ProductSize.objects.filter(product_id=OuterRef("pk"),
+quantity__gt=0))` и фильтрует по нему — это двойник на уровне запроса
+для Python-уровневого отката `ProductSerializer.get_in_stock`'s
+`obj.sizes.filter(quantity__gt=0).exists()` (ниже); оба вычисляют ровно
+одно и то же, один раз как фильтр и один раз как сериализованное поле,
+независимо друг от друга. `min_price`/`max_price` (`gte`/`lte` по
+`price`). `collection` (`iexact` по `collections__slug`).
+
+**С чем взаимодействует:** `products/models.py` (`Product`,
+`ProductSize`). Используется `ProductViewSet`/`WishlistViewSet` в
+`products/views.py` (`filterset_class = ProductFilter`). Фронтенд:
+`fetchProducts` у `api/products.ts` передаёт
+`category`/`collection`/`in_stock`/`min_price`/`max_price` напрямую как
+параметры запроса.
+
+**На что обратить внимание:** собственная запись про `api/products.ts`
+в руководстве по фронтенду отмечает связанный момент с той стороны —
+`get_queryset` у `ProductViewSet` в `products/views.py` **тоже**
+фильтрует `category`/`collection` вручную
+(`if category_slug: queryset = queryset.filter(category__slug=category_slug)`),
+в дополнение к собственной обработке этого `FilterSet`, и **только
+метод `filter_category` этого класса знает карту алиасов** — ручной
+фильтр в `get_queryset` делает точное совпадение
+`category__slug=category_slug` вообще без алиасов. Оба фильтра
+выполняются (DRF применяет каждый настроенный backend фильтрации), так
+что запрос с `?category=woman` (канонический слаг) фильтруется
+идентично дважды — избыточно, но безвредно — тогда как
+`?category=women` (алиас) корректно фильтруется `ProductFilter`, но
+**затем тоже** фильтруется снова буквальным совпадением
+`category__slug="women"` в `get_queryset`, которое ничего не найдёт,
+поскольку ни у одной строки `Category` на самом деле нет слага
+`"women"`. Подтверждено напрямую в этом проходе: ручная фильтрация в
+`get_queryset` выполняется на том же queryset, который `ProductFilter`
+отфильтрует потом через `filter_backends`/`filterset_class`, а фильтры
+QuerySet у Django аддитивны (объединяются через `AND`) — так что
+`?category=women` сегодня должен возвращать **ноль товаров**, поскольку
+один только ручной пункт `category__slug="women"` (без совпадающей
+категории) опустошает queryset ещё до того, как `ProductFilter` вообще
+успевает применить собственную, корректную алиасацию.
+
+**Вопрос для интервью:** *В: Учитывая, что и ручная фильтрация в
+`get_queryset`, и собственная привязка `filterset_class` у
+`ProductFilter` применяются к одному и тому же запросу, почему
+`?category=woman` (реальный слаг, не алиас) не ломается так же, как
+`?category=women`?* — Потому что ручной пункт `get_queryset` использует
+буквальное значение параметра запроса напрямую
+(`category__slug=category_slug`) — для самого канонического слага этот
+ручной фильтр и алиасированный фильтр `ProductFilter` (который мапит
+`"woman"` саму на себя, no-op через таблицу алиасов) оба разрешаются в
+идентичное условие `category__slug="woman"`, так что объединение через
+`AND` двух идентичных фильтров избыточно, но не разрушительно; только
+для значения-**алиаса** буквальное неалиасированное совпадение ручного
+фильтра расходится с тем, во что его корректно разрешает
+`ProductFilter`, и именно `AND` «правильного фильтра» с «фильтром на
+несуществующий слаг» опустошает результат.
+
+### `products/emails.py`
+
+**Что это:** `send_email_with_log` (общий низкоуровневый отправитель +
+писатель `EmailLog`), плюс три точки вызова:
+`send_back_in_stock_email` (рендерится из шаблона,
+`templates/emails/products/back_in_stock.txt`),
+`send_cart_reminder_email`/`send_wishlist_reminder_email` (оба строят
+своё тело как инлайновую f-строку, **вообще без файла шаблона** —
+собственный раздел руководства по фронтенду «Бэкенд — шаблоны писем»
+отмечает это явно: эти две — единственные отправки писем в бэкенде,
+пропускающие `render_to_string` полностью).
+
+**Как работает `send_email_with_log`:** строит `EmailMessage` (не
+`EmailMultiAlternatives` — только простой текст, как и каждое письмо в
+этом бэкенде, кроме `newsletter_welcome`), отправляет его и — **внутри
+того же блока `try`, что и сама отправка** — записывает строку
+`EmailLog`, отражающую, вернул ли `msg.send(fail_silently=False)`
+истинный результат. Если `send()` кидает исключение, ветка `except`
+пишет строку `EmailLog` со **`status="failed"`**, с `str()` исключения
+как `error_message`, затем **перебрасывает исключение снова** — в
+отличие от каждого отправителя в `accounts/emails.py`/`orders/emails.py`,
+которые все глотают собственные исключения за голым
+`except Exception: logger.exception(...)`, вызывающие этой функции
+(`send_back_in_stock_email`, вызывается из собственного
+`try/except` у `products/signals.py` — см. этот файл выше;
+`send_cart_reminder_email`/`send_wishlist_reminder_email`, вызываются
+из массовых действий `accounts/admin.py`, у которых есть **свой**
+`try/except` на пользователя) каждый сам отвечает за перехват
+переброшенного исключения. Это единственный модуль отправки писем в
+бэкенде, который не сдерживает собственный сбой сам.
+
+**С чем взаимодействует:** `products/models.py` (`EmailLog`, `Product`).
+Вызывается из `products/signals.py` (возврат в наличии) и двух массовых
+действий `accounts/admin.py` (напоминания о корзине/вишлисте — см.
+собственную запись того файла выше).
+
+**На что обратить внимание:** `send_email_with_log` молча возвращается
+(без отправки, без строки `EmailLog`, без исключения), если `to_email`
+ложен — записи в журнале вообще нет для «мы попытались написать кому-то,
+но не было адреса», а это значит, что аудит попыток отправки на основе
+`EmailLog` не может отличить «никогда не пытались, потому что не было
+адреса» от «на самом деле никогда не запускалось» — оба просто дают ноль
+строк.
+
+### `products/serializers.py`
+
+**Что это:** тринадцать сериализаторов, охватывающих весь каталог +
+поверхность корзины: `ProductImageSerializer`, `CategorySerializer`,
+`CollectionSerializer`, `ProductGroupSerializer`, `SizeSerializer`,
+`ProductSizeInlineSerializer`, `ProductMiniSerializer`,
+`ProductColorVariantSerializer`, `ProductSerializer`,
+`ProductSizeSerializer`, `CartItemSerializer`, `CartSerializer` — плюс
+три функции-хелпера на уровне модуля (`force_https`, `build_abs_https`,
+`get_product_main_image_url`).
+
+**Хелперы URL изображений, сначала, поскольку от них зависят три
+сериализатора:**
+- **`force_https(url)`**: переписывает схему `http://`-URL на
+  `https://` (через `urlparse`/`urlunparse`); оставляет
+  бессхемное значение (голый относительный путь) и всё уже `https://`
+  нетронутым.
+- **`build_abs_https(request, url)`**: если `url` начинается с `/` и
+  доступен `request`, сначала вызывает `request.build_absolute_uri(url)`
+  (превращая относительный путь хранилища в полный URL относительно
+  текущего хоста), затем всегда прогоняет результат через
+  `force_https`. Без `request` в контексте (например, сериализатор,
+  созданный вне view, как делают некоторые тесты), относительный URL
+  остаётся относительным.
+- **`get_product_main_image_url(obj, request)`**: пробует первый
+  `ProductImage` (по `sort_order`, `id`), если он существует и имеет
+  файл, откатываясь к `Product.main_image`, если нет, возвращая `None`,
+  если ни один не дал URL — **обе** ветки по отдельности обёрнуты в
+  собственный `try/except Exception: pass` (тихо, без логирования), а
+  не один `try/except` вокруг всей функции, так что сломанное первое
+  изображение не мешает попробовать `main_image` как второй шанс. Эта
+  функция предшествует фиксу «Catalog 500 on unguarded image URLs»
+  (`docs/fixes-2026-09.md`) и была для него шаблоном — три метода
+  сериализатора, которые тронул этот фикс
+  (`ProductImageSerializer.get_image_url`,
+  `ProductSerializer.get_color_swatch_url`,
+  `ProductColorVariantSerializer.get_color_swatch_url`) были подтянуты
+  до того же стандарта «никогда не позволяй `.url` кинуть исключение
+  мимо этой функции», который эта уже удовлетворяла, **за исключением**
+  того, что эти три теперь также вызывают `logger.exception(...)` перед
+  возвратом `None`, чего эта исходная функция всё ещё не делает —
+  реальная, пусть и небольшая, несогласованность: исходный паттерн, по
+  образцу которого построен этот фикс, строже насчёт тишины, чем в
+  итоге получился сам фикс.
+
+**`ProductImageSerializer`**: `id`, `image_url`
+(`SerializerMethodField`, защищён по фиксу выше), `sort_order`,
+`alt_text`, `is_primary`. Используется вложенно внутри
+`ProductSerializer.images` (`many=True`).
+
+**`CategorySerializer`/`CollectionSerializer`/`ProductGroupSerializer`**:
+почти идентичные трёхпольные проброски (`id`, `name`, `slug`).
+
+**`SizeSerializer`**: `id`, `name`. **`ProductSizeInlineSerializer`**:
+вкладывает `SizeSerializer` (read-only) плюс `id`, `quantity` —
+используется внутри `ProductSerializer.sizes`.
+**`ProductSizeSerializer`** (другой, верхнеуровневый сериализатор, не
+вложенный выше) дополнительно вкладывает полный `ProductMiniSerializer`
+для `product` — используется только внутри
+`CartItemSerializer.product_size` (ниже), поэтому payload
+`product_size` строки корзины намного богаче, чем простой
+`ProductSizeInlineSerializer`, вложенный под листингом товара.
+
+**`ProductMiniSerializer`**: `id`, `name`, `price`, `return_policy`,
+`allows_custom_length`, `custom_length_cm`, `custom_length_surcharge`,
+`main_image_url` — намеренно урезанный вид `Product` (без `category`,
+списка `images`, `variants`, состояния вишлиста и т. д.), используемый
+именно там, где строке корзины нужно ровно столько контекста товара,
+чтобы отрендериться и узнать, применяется ли произвольная длина, без
+веса полного payload каталога.
+
+**`ProductColorVariantSerializer`**: `id`, `name`, `color_name`,
+`color_hex`, `color_swatch_url`, `main_image_url`, `return_policy` — по
+одной записи на цветовой вариант, возвращается как список
+`ProductSerializer.get_variants` (ниже). `get_color_swatch_url` — один
+из трёх методов, тронутых фиксом «Catalog 500».
+
+**`ProductSerializer`**: полный payload каталога —
+`serializer_class` у `ProductViewSet`/`WishlistViewSet`. Вкладывает
+`ProductImageSerializer` (`images`, many), `ProductSizeInlineSerializer`
+(`sizes`, many), `CategorySerializer`, `CollectionSerializer` (many),
+`ProductGroupSerializer`, плюс шесть `SerializerMethodField`:
+`color_swatch_url` (тоже тронут фиксом «Catalog 500»),
+`main_image_url`, `variants`, `collections_slugs`, `collections_names`,
+`is_in_wishlist`, `in_stock`.
+- **`get_variants`**: если `obj.group_id` установлен, возвращает каждый
+  товар с `available=True` в той же группе (упорядоченный по `id`),
+  сериализованный через
+  `ProductColorVariantSerializer(..., context=self.context)` —
+  **включая сам `obj`**, поскольку queryset —
+  `obj.group.products.filter(available=True)` без исключения id
+  текущего товара. Без группы откатывается к
+  `Product.objects.filter(id=obj.id)` — однопунктовый queryset,
+  содержащий только этот товар, так что `variants` **никогда не
+  пуст** ни для одного товара, против которого выполняется этот
+  сериализатор, сгруппирован он или нет.
+- **`get_is_in_wishlist`**: предпочитает **аннотацию**
+  (`obj._is_in_wishlist`, устанавливаемую
+  `get_queryset` у `ProductViewSet`/`WishlistViewSet` через
+  `Exists(...)` — см. `views.py` ниже), если она есть, откатываясь к
+  **запросу на объект** (`ProductWishlist.objects.filter(user=user,
+  product=obj).exists()`) только если аннотация отсутствует. Этот
+  откат существует именно для вложенных вызовов
+  `ProductColorVariantSerializer` из `get_variants` и для любого
+  другого пути кода, который конструирует `ProductSerializer` против
+  неаннотированного queryset — но у самого
+  `ProductColorVariantSerializer` **нет** поля `is_in_wishlist` вообще
+  (его нет в `Meta.fields` этого сериализатора), так что этот откат —
+  мёртвый вес именно для пути вариантов; он важен для верхнеуровневых
+  ответов списка/деталей товара, где аннотация `get_queryset` как раз и
+  избегает запроса N+1 на товар в постраничном списке из 12+
+  элементов.
+- **`get_in_stock`**: тот же паттерн «сначала аннотация, потом запрос
+  как откат» (`obj._in_stock`), Python-уровневый двойник
+  SQL-уровневого подзапроса `Exists(...)` у
+  `ProductFilter.filter_in_stock` — оба независимо вычисляют «есть ли у
+  этого товара хоть один `ProductSize` с `quantity > 0`».
+
+**`CartSerializer`**: `id`, `user` (read-only), `created_at`, `items`
+(`CartItemSerializer`, many, read-only) — тонкий; вся реальная логика в
+сериализаторе элемента, ниже.
+
+**`CartItemSerializer` — самый значимый сериализатор в файле, и тот,
+что был выделен в задаче отдельно:**
+- **Поля:** `product_size` (вложенный `ProductSizeSerializer`,
+  read-only — то, что показывает `GET`/ответ) против `product_size_id`
+  (`PrimaryKeyRelatedField`, `source="product_size"`,
+  `write_only=True`, `required=False` — то, что отправляет тело
+  `POST`/`PUT`); `quantity` (`min_value=1` через `extra_kwargs`,
+  `required=False`, чтобы `PUT` мог его опустить); семь полей измерений
+  (`custom_bust` и т. д., простая проброска, записываемая клиентом); и
+  — поле, которое задача выделила отдельно — **`custom_length_cm` и
+  `custom_length_surcharge`, оба явно объявлены `read_only=True`** на
+  сериализаторе, переопределяя то, что автоматическая генерация полей
+  `ModelSerializer` у DRF иначе бы вывела (что иначе сделало бы их
+  обычными записываемыми полями, поскольку ни одно из них не
+  `editable=False` на самой модели). Клиент может отправить эти два
+  ключа в теле запроса; сериализатор DRF просто **отбросит** их во
+  время валидации, поскольку входящее значение `read_only`-поля никогда
+  вообще не попадает в `validated_data`.
+- **`_get_cart`/`_get_product_size`/`_get_requested_quantity`**:
+  небольшие хелперы, каждый из которых откатывается к существующему
+  значению `self.instance`, когда соответствующего ключа нет в `attrs`
+  — именно это позволяет одному и тому же методу `validate()` корректно
+  обрабатывать и `create` (`self.instance is None`, всё должно прийти
+  из `attrs`), и **частичный** `update` (`self.instance` существует;
+  `PUT` только с `{"quantity": 4}` всё равно должен валидироваться
+  против *существующего* `product_size`, а не отсутствующего).
+  `_get_requested_quantity` также делает собственное приведение
+  `int(...)` с `try/except (TypeError, ValueError)` → `ValidationError`
+  на уровне поля, независимо от того, что сделало бы собственное
+  приведение `IntegerField` у DRF — этот метод работает с сырым
+  словарём `attrs` внутри `validate()`, не через объявленный
+  `IntegerField`, поскольку `quantity` здесь определён через
+  `extra_kwargs` на поле модели, а не переопределён как собственное
+  явное поле сериализатора, как `custom_length_cm`.
+- **`_get_other_cart_quantity`**: суммирует `quantity` по каждому
+  другому `CartItem` в той же корзине для **того же** `product_size`
+  (исключая `self.instance` при обновлении, чтобы редактирование
+  существующей строки не считало её дважды) — этот метод имеет смысл
+  только с учётом истории миграции `0019`, убравшей ограничение
+  `unique_together` у `CartItem` (см. раздел миграций выше): без этой
+  истории миграций для пары `(cart, product_size)` могла бы существовать
+  максимум одна строка `CartItem`, и этот суммирующий цикл имел бы
+  максимум одну строку для суммирования в любом случае.
+- **`validate()`**: полная цепочка проверки права по порядку — товар
+  должен быть `available`; `ProductSize.quantity` размера должно быть
+  вообще `> 0` (отдельная проверка от следующей, дающая конкретное
+  сообщение «нет в наличии», а не сворачивающая это в сообщение
+  «превышено количество»); `other_cart_quantity + quantity` (итог этой
+  строки, запрошенный плюс каждая *другая* строка, уже в корзине для
+  того же размера) не должно превышать `available_quantity` — сообщение
+  корректно склоняется (`"1 item"` против `"N items"`); и, только если
+  `custom_length_selected` истинно (откатываясь к существующему
+  значению экземпляра при обновлении), у товара должно быть
+  `allows_custom_length=True`, иначе запрос отклоняется.
+- **`_apply_custom_length_snapshot(validated_data)`**: вызывается и из
+  `create()`, и из `update()`, **после** того как `validate()` уже
+  выполнился (так что барьер `allows_custom_length` уже был применён
+  один раз). Если `custom_length_selected` (из `validated_data`,
+  откатываясь к существующему экземпляру) истинно: заново извлекает
+  `product.allows_custom_length` и **снова кидает исключение**, если
+  оно здесь каким-то образом `False` (вторая, избыточная проверка — см.
+  «На что обратить внимание»), затем ставит
+  `validated_data["custom_length_cm"] = product.custom_length_cm` и
+  `validated_data["custom_length_surcharge"] =
+  product.custom_length_surcharge` — **скопировано напрямую из строки
+  `Product` в момент сохранения, не из того, что отправил клиент**
+  (клиент и не мог бы отправить — оба поля `read_only`). Если
+  `custom_length_selected` ложно: явно сбрасывает все три связанных
+  поля (`custom_length_selected=False`, `custom_length_cm=None`,
+  `custom_length_surcharge=0`) — так что **снятие** произвольной длины
+  на существующей строке (через `PUT`) корректно очищает ранее
+  снятую наценку, а не оставляет устаревшую наценку прикреплённой к
+  строке, у которой больше не выбрана произвольная длина.
+
+**Перекрёстная ссылка — `tresse_frontend/src/store/serverCartSlice.ts`:**
+хелпер `postCartItem` этого файла намеренно никогда не отправляет
+`custom_length_cm`/`custom_length_surcharge` в теле запроса, с
+инлайновым комментарием, объясняющим именно это поведение
+read-only/серверного снимка — собственная запись руководства по
+фронтенду для этого файла подробно документирует это, включая то, что
+это ненадолго было помечено как потенциальный баг потери данных
+(внутренняя находка аудита, названная там «P0-03»), прежде чем чтение
+именно этого кода сериализатора показало, что это не баг: отправка этих
+двух полей с клиента была бы чистым лишним весом, поскольку
+`validate`/`_apply_custom_length_snapshot` в любом случае отбрасывают и
+пересчитывают их на сервере, независимо от того, что придёт в теле
+запроса.
+
+**С чем взаимодействует:** `products/models.py` (все одиннадцать
+моделей, кроме `Review`/`EmailLog`). Используется `CartAPIView`/
+`CartItemAPIView` (`CartItemSerializer`, `CartSerializer`) и
+`ProductViewSet`/`WishlistViewSet` (`ProductSerializer`) в
+`products/views.py`. Фронтенд: `store/serverCartSlice.ts` (эндпоинты
+корзины), `api/products.ts`/`view/ProductCatalog.tsx`/
+`view/ProductDetails.tsx`/`view/WishList.tsx` (payload'ы
+списка/детали товара).
+
+**На что обратить внимание:**
+- **Проверка `allows_custom_length` происходит дважды, в двух разных
+  местах, против одного и того же `product_size.product`**: один раз в
+  `validate()` (кидает `ValidationError`, если `custom_length_selected`
+  истинно, а товар этого не позволяет), и снова внутри
+  `_apply_custom_length_snapshot` (кидает **то же самое** сообщение об
+  ошибке во второй раз). Поскольку `_apply_custom_length_snapshot`
+  запускается только из `create()`/`update()`, которые DRF вызывает
+  только **после** успешного `validate()`, вторая проверка сейчас
+  недостижима в обычном потоке запроса — она имела бы значение только
+  если бы какой-то другой путь кода вызвал
+  `_apply_custom_length_snapshot` напрямую, минуя `is_valid()` (такой
+  точки вызова в этом коде сегодня нет), или если бы
+  `allows_custom_length` товара как-то изменилось **между**
+  выполнением `validate()` и вызовом `create()`/`update()` мгновениями
+  позже в том же запросе — узкая, маловероятная, но не невозможная
+  гонка, если паттерн использования этого сериализатора когда-нибудь
+  изменится (например, валидация и сохранение разделятся на два разных
+  запроса, что не соответствует тому, как `CartItemAPIView` использует
+  его сегодня).
+- **Валидация `quantity` живёт частично в `extra_kwargs`
+  (`min_value=1`), а частично в ручном приведении `int(...)` у
+  `_get_requested_quantity` внутри `validate()`** — два разных
+  механизма, обеспечивающих пересекающиеся правила (собственный
+  `min_value` на уровне поля DRF уже отклонил бы `0`/отрицательное
+  число до того, как `validate()` вообще запустится, в обычном случае,
+  когда `quantity` приходит как число JSON) — ручная проверка существует
+  именно для **нечислового** строкового значения, которое собственное
+  приведение DRF может не отклонить так же чисто, и для случая отката к
+  значению экземпляра при частичном обновлении, когда `quantity`
+  вообще нет в `attrs`, и напрямую используется сырое значение модели
+  (уже `int`).
+
+**Вопросы для интервью:**
+- *В: Почему `custom_length_cm` и `custom_length_surcharge` объявлены
+  явно на сериализаторе с `read_only=True`, а не просто исключены из
+  `Meta.fields` полностью, если клиент никогда не должен их
+  устанавливать?* — Им всё равно нужно появляться в **ответе** (`GET`/
+  объект, возвращаемый после `POST`/`PUT`, должен показать клиенту,
+  какая наценка на самом деле была применена) — поле, по-настоящему
+  исключённое из `Meta.fields`, вообще не сериализовалось бы в выводе;
+  `read_only=True` — как раз то, что даёт «показывается в ответах,
+  молча игнорируется на входе» одним объявлением, а это ровно тот
+  контракт, который нужен этому полю.
+- *В: Проследите, что происходит, если клиент добавляет в корзину товар
+  с произвольной длиной, а `custom_length_surcharge` товара меняет
+  админ через час, до того как клиент оформит заказ.* — Существующая
+  строка `CartItem` сохраняет ту наценку, что была снята снимком в
+  момент, когда её добавили (или последний раз обновили) — ничто не
+  пересинхронизирует строку корзины с живой ценой товара постфактум.
+  Клиент увидит старую наценку, пока либо не удалит и заново не добавит
+  товар, либо не выполнит любое обновление, которое снова пройдёт через
+  `_apply_custom_length_snapshot` с всё ещё истинным
+  `custom_length_selected` (что заново прочитает **текущий**
+  `product.custom_length_surcharge` в этот момент) — например, `PUT`
+  только с количеством всё равно пройдёт через
+  `_apply_custom_length_snapshot` (вызывается безусловно из `update()`)
+  и потому **тоже** молча обновит наценку до текущей, даже если клиент
+  хотел изменить только количество.
+- **Более сложный вопрос:** *В: `_get_other_cart_quantity` исключает
+  `self.instance` «при обновлении» — но при **создании** (`self.instance
+  is None`), есть ли риск, что запрос дважды посчитает ту самую строку,
+  которую он вот-вот создаст?* — Нет — при создании новый `CartItem`
+  ещё не существует в момент выполнения `_get_other_cart_quantity` (он
+  запрашивает `CartItem.objects.filter(cart=cart,
+  product_size=product_size)` против уже сохранённых строк), так что
+  каждая строка, найденная запросом, — действительно другая,
+  ранее существовавшая строка; исключать нечего, поскольку случайно
+  включить нечего. Исключение важно только для обновления, где сама
+  проверяемая строка **уже существует** в таблице, которую сканирует
+  запрос, и иначе посчитала бы саму себя один раз в
+  `other_cart_quantity`, а затем ещё раз через слагаемое `+ quantity` в
+  `requested_cart_total = other_cart_quantity + quantity`, молча
+  урезая вдвое эффективный лимит для любого обновления существующей
+  строки (например, размер с доступными 5 и одной существующей строкой
+  количества 3 без исключения вычислил бы `other_cart_quantity=3` даже
+  при попытке обновить ту же строку до `quantity=3` снова — изменение,
+  по сути ничего не меняющее — и отклонил бы это как `3 + 3 = 6 > 5`).
+
+### `products/admin.py`
+
+**Что это:** регистрации в админке для всех одиннадцати моделей, кроме
+`ProductWishlist`... **`Review` на самом деле зарегистрирован**
+(`ReviewAdmin`) — не зарегистрирован в админке только `ProductWishlist`
+(**unverified**, намеренно ли это, поскольку записи вишлиста, пожалуй,
+не то, что персонал должен просматривать напрямую, в отличие от каждой
+другой модели пользовательского контента в этом приложении, у которой
+такая регистрация есть).
+
+**Заметные детали:** `ProductAdmin` использует `SortableAdminMixin`
+(перетаскивание в списке изменений, работающее на `sort_order` — поле,
+в которое `ProductViewSet.reorder` (ниже) тоже пишет, через совершенно
+отдельный путь кода: перетаскивание в админке и действие API `PATCH
+.../reorder/` оба независимо меняют одно и то же поле, без общего кода
+между ними) и кастомную `ProductAdminForm`, которая рендерит
+`collections` как чекбоксы (`CheckboxSelectMultiple`) вместо стандартного
+виджета мультивыбора. У `ProductImageInline`
+(`SortableInlineAdminMixin`) свой метод `preview` — **четвёртая**
+независимая реализация «защити `.url`» (см. «На что обратить
+внимание» у `models.py` выше). `ProductAdmin.color_preview` рендерит
+либо изображение образца цвета (если задано, само защищено
+`try/except`), либо простой CSS-образец цвета из `color_hex` как откат,
+либо тире, если не задано ни то, ни другое. `EmailLogAdmin` **полностью
+read-only** — `has_add_permission`/`has_change_permission`/
+`has_delete_permission` все захардкожены в `False`, так что эта
+таблица по-настоящему только-на-добавление с точки зрения админки
+(строки всё ещё можно удалить напрямую через базу данных/shell, просто
+не через этот UI).
+
+**Вопрос для интервью:** *В: И перетаскивание `ProductAdmin` (через
+`SortableAdminMixin`), и действие `PATCH` у `ProductViewSet.reorder`
+пишут в `Product.sort_order`. Есть ли какая-то координация между
+ними?* — Ничего не найдено в этом проходе — это два полностью отдельных
+пути кода (один запускается UI админки через собственный AJAX-эндпоинт
+`django-adminsortable2`, один — кастомное DRF-действие `@action`),
+которые случайно сходятся на одном и том же поле; какой бы из них ни
+выполнился последним, он просто перезаписывает тот порядок, что
+установил другой, без блокировки, версионирования или обнаружения
+конфликтов между ними — приемлемо на практике только потому, что оба —
+операции только для персонала, с низкой частотой, не то, что два
+человека, вероятно, будут делать с одним и тем же списком товаров
+одновременно.
+
+### `products/urls.py`
+
+```
+cart/                        -> CartAPIView                          (name: user-cart)
+cart/items/                  -> CartItemAPIView (POST)                (name: cart-items)
+cart/items/<int:item_id>/    -> CartItemAPIView (PUT, DELETE)         (name: cart-item)
+wishlist/                    -> WishlistViewSet (router)              (basename: wishlist)
+wishlist/count/               -> WishlistViewSet.count                (name: wishlist-count)
+<корень роутера>              -> ProductViewSet (router)              (basename: product)
+  /<pk>/wishlist/             -> ProductViewSet.wishlist               (name: product-wishlist)
+  /<pk>/subscribe_back_in_stock/ -> ProductViewSet.subscribe_back_in_stock (name: product-subscribe-back-in-stock)
+  /reorder/                   -> ProductViewSet.reorder                (name: product-reorder)
+```
+
+Два зарегистрированных через `DefaultRouter` вьюсета живут в этом файле:
+`wishlist`, смонтированный явно на `r"wishlist"`, и `ProductViewSet`,
+смонтированный на **корне** роутера (`r""`) — то есть собственные
+маршруты списка/детали `ProductViewSet` (`GET /products/`, `GET
+/products/<pk>/`) и каждое кастомное `@action` на нём живут прямо под
+`/products/`, тогда как маршруты `wishlist/` пространство имён внутри
+`/products/wishlist/`. Подключено на `api/products/` через
+`tresse/urls.py`.
+
+### `products/views.py`
+
+**Что это:** `CartAPIView`, `CartItemAPIView`, `ProductViewSet`,
+`WishlistViewSet`.
+
+**`CartAPIView`** (`IsAuthenticated`, только `GET`): делает
+`get_or_create` для `Cart`, затем **заново извлекает её** по `pk` с
+полной цепочкой `select_related`/`prefetch_related` (`user`,
+`items__product_size__size`,
+`items__product_size__product__images`,
+`items__product_size__product__category`,
+`items__product_size__product__collections`) перед сериализацией — сам
+вызов `get_or_create` не несёт этих связей, так что этот двухшаговый
+паттерн «создать-или-получить, затем заново извлечь с реальным планом
+запроса» избегает либо N+1 (сериализация неоптимизированного результата
+`get_or_create` напрямую), либо извлечения связей для корзины, которую,
+возможно, не нужно было создавать вообще.
+
+**`CartItemAPIView`** — три метода, без `queryset`/`serializer_class`
+уровня класса (обычный `APIView`, не `ModelViewSet`), каждый обёрнут в
+собственный `transaction.atomic()`:
+- **`post`**: проверяет, что `product_size_id` присутствует и является
+  целым числом, ещё до открытия транзакции (для `400` на
+  отсутствующий/некорректный id блокировка не нужна). Внутри
+  транзакции: делает `get_or_create` для корзины, затем **заново
+  извлекает её с `select_for_update()`** (второй запрос, намеренно —
+  сам `get_or_create` нельзя объединить с `select_for_update` в одном
+  вызове), блокирует целевую строку `ProductSize` так же, строит
+  изменяемую копию payload запроса с `product_size_id`, принудительно
+  установленным на id **заблокированной** строки (защитно — гарантирует,
+  что сериализатор валидирует против точно той строки, на которую этот
+  запрос уже держит блокировку, а не против устаревшего незаблокированного
+  чтения), по умолчанию ставит `quantity` в `1`, если пусто, затем
+  валидирует+сохраняет через
+  `CartItemSerializer(data=payload, context={"request":...,
+  "cart": cart})`. `serializers.ValidationError` внутри `try` явно
+  **перебрасывается снова** (не глотается) — так что собственный
+  обработчик исключений DRF всё равно превращает его в обычный ответ
+  `400`; `try/except` здесь существует, чтобы сделать явной *область
+  блокировки* (всё, что требует блокировок строк, происходит внутри
+  неё), а не чтобы перехватывать ошибки валидации. После закрытия
+  транзакции заново извлекает созданный элемент с собственной цепочкой
+  `select_related`/`prefetch_related` для ответа — тот же паттерн
+  «пиши внутри блокировки, заново извлекай с более богатым планом
+  запроса для ответа», что использует `CartAPIView`.
+- **`put`**: та же форма блокировки — блокирует `Cart` пользователя,
+  затем целевой `CartItem` (`404`, если не найден или не принадлежит
+  этому пользователю — проверка владения встроена прямо в
+  `filter(id=item_id, cart=cart)`, не отдельная проверка прав),
+  затем собственный `ProductSize` элемента, принудительно
+  устанавливает `product_size_id` обратно в payload (**так что клиент
+  не может изменить, на какой товар/размер указывает строка корзины,
+  через этот эндпоинт**, даже если тело запроса содержало другой
+  `product_size_id` — идентичность строки фиксирована с момента
+  создания; через `PUT` могут меняться только количество/измерения),
+  валидирует+сохраняет через
+  `CartItemSerializer(item, data=payload, partial=True, ...)`.
+- **`delete`**: **единственный** из трёх методов, который **не**
+  использует `select_for_update()`/явную транзакцию вообще — обычный
+  `get_object_or_404` для корзины, затем элемента (ограничен этой
+  корзиной, тот же паттерн владения через фильтр), затем `.delete()`.
+  Ни одна блокировка не берётся перед удалением.
+
+**`ProductViewSet`** (`ReadOnlyModelViewSet`, `AllowAny`): только
+`list`/`retrieve` (никакого create/update/delete через собственные
+маршруты вьюсета) плюс четыре кастомных элемента.
+- **`get_queryset`**: базовый queryset с `select_related`
+  (`category`, `group`) и цепочкой `prefetch_related`, включающей
+  **`group__products`/`group__products__images`** — предзагрузку каждого
+  *другого* товара в той же цветовой группе, и *их* изображений тоже,
+  для **каждого** товара в наборе результатов — именно это позволяет
+  `get_variants` (`serializers.py`, выше) избежать свежего запроса на
+  товар при построении списка цветовых вариантов, ценой предзагрузки
+  данных, потраченных впустую для (вероятно, частого) случая товара
+  вообще без группы. Аннотирует `_in_stock` через `Exists(...)`
+  безусловно (каждый запрос получает эту аннотацию, используется
+  параметр фильтра `in_stock` или нет — именно её читает
+  `ProductSerializer.get_in_stock`, чтобы избежать собственного
+  запроса-отката на объект) и `_is_in_wishlist` **только если
+  запрашивающий аутентифицирован** (анонимный запрос никогда не
+  получает эту аннотацию, так что `get_is_in_wishlist` каждого товара
+  откатывается к своей ветке «`False`» для анонима, которая для этого
+  случая вообще никогда не запрашивает `ProductWishlist`). Также
+  применяет ручную фильтрацию `category`/`collection`,
+  задокументированную в «На что обратить внимание» у `filters.py`
+  выше, **в дополнение** к тому, что делает `ProductFilter`
+  (`filterset_class`) — заканчивается `.distinct()` (нужно, потому что
+  соединения `ManyToManyField` `collections`/`group__products` иначе
+  могут умножить строки).
+- **`get_serializer_context`**: добавляет `request` — без этого
+  override контекст по умолчанию у `ReadOnlyModelViewSet` уже включает
+  `request` в современных версиях DRF, делая этот override
+  **избыточным** конкретно для этого ключа в текущих версиях DRF
+  (**unverified**, какую версию DRF закрепляет этот проект и
+  предшествует ли override версии DRF, где он был реально нужен);
+  безвредно в любом случае.
+- **`wishlist`** (`@action`, `POST`/`DELETE`, `IsAuthenticated`):
+  `get_or_create`/`.delete()` на `ProductWishlist`, возвращает только
+  `{"is_in_wishlist": true/false}` — никакого обновлённого payload
+  товара, никакого счётчика вишлиста. `inc`/`dec` у
+  `store/wishListSlice.ts` (согласно руководству по фронтенду) —
+  оптимистичный UI-механизм, который существует именно потому, что
+  собственный ответ этого эндпоинта не включает свежий счётчик, который
+  вызывающий мог бы иначе прочитать напрямую.
+- **`subscribe_back_in_stock`** (`@action`, `POST`, `AllowAny`,
+  throttle подписки на склад): `request.user.email` аутентифицированных
+  пользователей используется автоматически (игнорируя любой `email`,
+  который может содержать тело запроса); анонимные запросы читают
+  `email` из тела и валидируют его через
+  `django.core.validators.validate_email`. Делает `get_or_create` для
+  `StockSubscription` — и, **отдельно**, если запрос аутентифицирован,
+  но у найденной/созданной подписки ещё нет `user` (например, гость
+  подписался с этим email до создания аккаунта, а теперь подписывается
+  снова, залогинившись с тем же адресом), **дозаполняет**
+  `subscription.user` на существующей строке вместо создания второй —
+  `unique_together = ("product", "email")` — именно то, что делает это
+  безопасным: вызов `get_or_create` гарантированно находит существующую
+  строку по email, а не рискует дубликатом.
+- **`reorder`** (`@action`, `PATCH`, `IsAdminUser`): ожидает
+  `{"items": [{"id": ...}, ...]}`; **порядок самого массива** становится
+  новым `sort_order` (`enumerate(items)`, индекс → `sort_order`) —
+  некорректный/отсутствующий `id` в любой одной записи массива молча
+  пропускается (`continue`), не отклоняется целиком, так что частично
+  некорректный запрос всё равно применяет те валидные записи, что в нём
+  были, а не проваливает весь пакет.
+
+**`WishlistViewSet`** (`ReadOnlyModelViewSet`, `IsAuthenticated`): по
+сути важен только `list` (`retrieve` технически тоже доступен, через ту
+же базу `ReadOnlyModelViewSet`, но ничто в собственном прочтении
+`view/WishList.tsx` руководством по фронтенду не предполагает, что он
+используется для получения одного элемента). `get_queryset` фильтрует
+`Product` до только id из `ProductWishlist` пользователя, с **той же**
+цепочкой `select_related`/`prefetch_related`, что использует
+`ProductViewSet.get_queryset`, плюс `_is_in_wishlist`
+**захардкожен в `Value(True, ...)`**, а не подзапрос `Exists(...)` —
+разумное сокращение, поскольку каждый товар, который возвращает этот
+queryset, по построению уже в вишлисте; запрос не нужен, чтобы
+подтвердить то, что уже гарантировано пунктом `filter(id__in=
+wish_ids)`. Отдельное `@action`, `count` (`GET
+/products/wishlist/count/`), возвращает только `{"count": n}` —
+эндпоинт, который вызывает thunk `fetchWishlistCount` у
+`store/wishListSlice.ts`.
+
+**С чем взаимодействует:** каждый сериализатор в
+`products/serializers.py`, кроме `ProductSizeInlineSerializer`/
+`ProductGroupSerializer`/`ProductColorVariantSerializer` (используются
+только косвенно, вложенно внутри `ProductSerializer`),
+`products/filters.py` (`ProductFilter`), `products/throttles.py`.
+Фронтенд: `api/products.ts` (`fetchProducts`),
+`store/serverCartSlice.ts` (все четыре эндпоинта корзины),
+`store/wishListSlice.ts` (`count`), `view/ProductCatalog.tsx`/
+`view/ProductDetails.tsx` (переключение вишлиста, подписка на возврат в
+наличии), `view/WishList.tsx`.
+
+**На что обратить внимание:**
+- **`CartItemAPIView.delete` — единственный путь записи в этом файле
+  вообще без блокировки строки** — каждый другой мутирующий метод
+  (`post`/`put`, и, за пределами этого класса,
+  `ProductViewSet.reorder`) открывает `transaction.atomic()` и берёт
+  блокировки `select_for_update()` перед записью; `delete` идёт прямо к
+  `.delete()` без транзакции или блокировки. На практике удаление
+  строки одновременно с чем-то ещё, читающим/пишущим ту же строку, —
+  более узкий риск, чем гонки количество-против-склада, от которых
+  защищаются другие методы, но это реальная асимметрия в собственной
+  дисциплине блокировок этого файла.
+- **Ручная фильтрация category/collection у `get_queryset` плюс
+  собственная обработка тех же двух параметров у `ProductFilter`** —
+  это баг `?category=women`, задокументированный в собственном «На что
+  обратить внимание» у `filters.py` выше — повторено здесь, поскольку
+  это файл, где на самом деле живёт избыточный, слепой к алиасам ручной
+  фильтр.
+- **Внедрение `request` в `get_serializer_context` продублировано
+  между `ProductViewSet` и `WishlistViewSet`** — идентичный
+  трёхстрочный override в обоих классах, не вынесенный в общую
+  базу/миксин, хотя оба вьюсета иначе делят большую часть собственной
+  логики `get_queryset` тоже (цепочка `select_related`/
+  `prefetch_related` скопирована между двумя, тоже не вынесена в
+  функцию-хелпер).
+
+**Вопросы для интервью:**
+- *В: Почему `CartItemAPIView.post` принудительно ставит
+  `product_size_id` в payload на id **заблокированной** строки, а не
+  доверяет тому `product_size_id`, что реально отправил клиент?* — К
+  моменту, когда выполняется эта строка, код уже разрешил и заблокировал
+  конкретную строку `ProductSize`
+  (`product_size = ProductSize.objects.select_for_update()...first()`)
+  — переписывание payload на подтверждённый id этой строки (а не на
+  сырой, незаблокированный ввод клиента) гарантирует, что сериализатор,
+  валидирующий дальше склад/право, проверяет **ровно ту же строку**,
+  на которую транзакция держит блокировку, закрывая любой разрыв между
+  «какую строку мы заблокировали» и «против какой строки, по мнению
+  сериализатора, он валидирует».
+- *В: `subscribe_back_in_stock` доступен и аутентифицированным, и
+  анонимным запросам, на одном `AllowAny`-действии. Что мешает запросу
+  аутентифицированного пользователя когда-либо попасть в анонимную
+  ветку email-из-тела?* — Ветка `if request.user.is_authenticated: ...
+  else: ...` проверяется первой и исчерпывающая —
+  аутентифицированный запрос всегда берёт ветку `request.user.email` и
+  никогда вообще не читает `request.data.get("email")`, независимо от
+  того, что содержит тело; нет способа для тела запроса
+  аутентифицированного вызывающего переопределить, чей email
+  используется.
+- **Более сложный вопрос:** *В: `ProductViewSet.get_queryset`
+  аннотирует `_is_in_wishlist` только для аутентифицированного запроса.
+  Проследите точно, что делает
+  `ProductSerializer.get_is_in_wishlist` для анонимного запроса к `GET
+  /products/`, и подтвердите, что в этом пути не спрятана стоимость
+  запроса на товар.* — Для анонимного запроса `_is_in_wishlist` никогда
+  не устанавливается ни на одном экземпляре товара, так что
+  `getattr(obj, "_is_in_wishlist", None)` возвращает `None` для каждого
+  товара, что `get_is_in_wishlist` трактует как «нет аннотации» и
+  попадает в свою ветку отката — но сам этот откат сначала проверяет
+  `user and user.is_authenticated`, а для анонимного запроса
+  `request.user` — это `AnonymousUser` Django, чьё `is_authenticated`
+  по замыслу `False` — так что откат сразу возвращает `False`, вообще
+  не доходя до запроса
+  `ProductWishlist.objects.filter(...)`. Для анонимного пути стоимости
+  запроса на товар не существует; аннотация существует исключительно
+  для того, чтобы избежать этой стоимости для
+  **аутентифицированного** пути, где откат иначе реально выполнялся бы
+  по разу на товар.
+
+### `products/tests.py`
+
+535 строк, десять классов тестов, без общего базового тестового класса
+— каждый класс строит свои фикстуры через локальный хелпер
+`_make_product(**kwargs)` (по умолчанию: `name="Sweater"`,
+`price=Decimal("50.00")`) и общий `testing_helpers.make_user`
+(импортируется как `from testing_helpers import make_user` —
+заметьте, собственный внутренний комментарий-заголовок этого модуля
+гласит `# tresse_backend/test_utils.py`, устаревшее имя файла, которое
+больше не совпадает с тем, где этот файл реально лежит,
+`testing_helpers.py` в корне репозитория; безвредно, но реальная
+несогласованность, если кто-то пойдёт искать `test_utils.py` исходя
+только из этого комментария).
+
+**Что мокается, по областям:**
+- `products.signals.send_back_in_stock_email` мокается в каждом тесте
+  `StockSignalTestCase` — ни один из них не даёт реальной попытке
+  письма случиться; каждый также оборачивает вызывающее `.save()` в
+  `self.captureOnCommitCallbacks(execute=True)` (см. собственный «более
+  сложный вопрос» для интервью у `signals.py` выше — почему эта
+  обёртка несёт нагрузку, а не опциональна, именно для этих
+  утверждений).
+- `ImageUrlFailureTestCase` (добавлен для фикса «Catalog 500 on
+  unguarded image URLs», `docs/fixes-2026-09.md`) патчит сам
+  `django.db.models.fields.files.FieldFile.url` — `PropertyMock`,
+  кидающий `ValueError` — а не мокает собственный код этого
+  приложения, так что тест прогоняет реальные методы
+  `ProductImageSerializer`/`ProductSerializer`/
+  `ProductColorVariantSerializer` против по-настоящему кидающего
+  исключение свойства `.url`, того же режима отказа, что произвело бы
+  реально сломанное хранилище.
+- Ни один тест в этом файле не мокает `django_filters`/бэкенды фильтров
+  DRF — `ProductFilterTestCase` вызывает `ProductFilter(...).qs`
+  напрямую против реального, немокнутого queryset, а
+  `ProductListAPITestCase`/`ProductReorderTestCase` проходят через
+  реальный `APIClient` от начала до конца.
+
+**Что утверждается, по областям:**
+- **`CartItemAddTestCase`/`CartItemUpdateDeleteTestCase`**: полная
+  цепочка `CartItemSerializer.validate()` снаружи — лимиты склада
+  (включая случай суммирования по строкам,
+  `test_adding_same_size_twice_aggregates_against_stock`, собственный
+  инлайновый комментарий которого называет его «ключевым» тестом
+  именно для последствия миграции `0019`, задокументированного в
+  разделе `serializers.py` выше), отклонение недоступного/не в
+  наличии товара, владение (`404`, не `403`, для элемента корзины
+  другого пользователя — согласуется с тем, что поиск в
+  `CartItemAPIView` на основе `filter(..., cart=cart)` ничего не
+  возвращает, а не даёт отличимый сигнал «существует, но не твоё»), и
+  снимок произвольной длины, реально попадающий на созданную строку с
+  текущими значениями `custom_length_cm`/`custom_length_surcharge`
+  товара.
+- **`WishlistActionTestCase`**: добавление/удаление/идемпотентное
+  добавление (пост дважды создаёт ровно одну строку), эндпоинт
+  счётчика, и `401` для переключения вишлиста без аутентификации.
+- **`StockSubscriptionTestCase`**: аноним-с-email, аутентифицированный
+  использует свой email, оба невалидный/отсутствующий email отклонены,
+  дублирующая подписка остаётся одной строкой.
+- **`ProductReorderTestCase`**: `403` для не-админа, реальная смена
+  `sort_order` для админа, и не-список `items` отклонён с `400`.
+- **`ProductFilterTestCase`**: карта алиасов категории, диапазон цен и
+  фильтрация по наличию — напрямую против `ProductFilter(...).qs`, не
+  через полный стек view, так что именно этот класс тестов **не**
+  поймал бы взаимодействие ручного фильтра у `get_queryset`,
+  задокументированное в «На что обратить внимание» у `filters.py`
+  выше (этот баг проявляется, только когда оба фильтра работают
+  вместе, а это случается только через реальный view).
+- **`ImageUrlFailureTestCase`**: прямое регрессионное покрытие фикса
+  «Catalog 500» — каждый из трёх тронутых методов сериализатора
+  возвращает `None` для своего одного поля, пока остальная часть
+  payload, включая вложенный список (собственный `images` у
+  `ProductSerializer`), остаётся нетронутой.
+- **`StockSignalTestCase`**: полная матрица обнаружения восстановления
+  из `notify_when_back_in_stock` у `signals.py` — ноль-к-положительному
+  отправляет, ноль-к-нулю не отправляет, уменьшение не отправляет,
+  положительное-к-положительному не отправляет, уже уведомлённая
+  подписка не уведомляется дважды — это прямое регрессионное покрытие
+  и для [[P0-01]] (сигнал вообще никогда не срабатывал), и для
+  [[P0-02]] (сигнал срабатывал слишком охотно), оба в
+  `docs/fixes-2026-09.md`.
+
+**Вопрос для интервью:** *В:
+`test_adding_same_size_twice_aggregates_against_stock` постит один и
+тот же `product_size_id` дважды с `quantity: 3` каждый раз, против
+`ProductSize` с `quantity=5`, и ожидает, что **второй** запрос будет
+отклонён. Почему этот тест имеет смысл только с учётом истории миграции
+`0019`?* — Потому что он утверждает, что две отдельные строки
+`CartItem` для одной и той же пары `(cart, product_size)` вообще
+возможно создать в первую очередь (первый `POST` успешен и создаёт
+одну), и что суммирующая логика `_get_other_cart_quantity` затем
+корректно ловит второй запрос как превышающий доступный склад
+совокупным итогом — если бы у `CartItem` всё ещё было ограничение
+`unique_together`, изначально добавленное миграцией `0018` (до того,
+как `0019` его убрала), **первый** успешный `POST` уже создал бы
+единственную строку, которую допускает БД для этой пары, а второй
+`POST` для того же размера пришлось бы обрабатывать как замаскированное
+обновление (или отклонять на уровне БД), а не когда-либо достигать
+пути кода «две строки, суммируй их количества», который этот тест на
+самом деле проверяет.
+
+---
+
 ## Как части сходятся
 
 Четыре разбора, каждый называет файлы по порядку, по обеим кодовым

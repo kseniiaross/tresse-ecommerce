@@ -5185,6 +5185,1900 @@ created).
 
 ---
 
+## Backend — accounts
+
+Continuing the same file-by-file pass as the `newsletter`/email-templates
+sections above, now over `tresse_backend/accounts/` — the app that owns
+the `User` model, registration, login, password reset, the self-service
+account-deactivation/restore flow, and the shipping-address profile.
+Several frontend files call directly into it (`api/auth.ts`,
+`api/account/ChangePassword.ts`, `components/Authorization.tsx`,
+`components/Register.tsx`, `components/AccountRestore.tsx`,
+`components/PasswordResetConfirm.tsx`, `components/PasswordChange.tsx`,
+`view/Dashboard.tsx`) and this section cross-references each by path
+rather than repeating what's already documented above.
+
+### `accounts/models.py`
+
+**What it is:** `UserManager` (a custom `BaseUserManager`), `User` (a
+custom `AbstractBaseUser`/`PermissionsMixin`, email-based rather than
+Django's default username-based model), and `UserProfile` (a one-to-one
+shipping-address record).
+
+**Why it exists:** Email-based login needs a custom user model —
+Django's built-in `User` is username-first. Soft delete lives directly on
+`User` itself (`is_active`/`deleted_at`) rather than a separate table, and
+the shipping address is split out into `UserProfile` so `User` stays
+about identity/auth only.
+
+**What it exports:** `UserManager`, `User`, `UserProfile`.
+
+**How it works:**
+- **`UserManager.create_user(email, phone_number, password, first_name,
+  last_name, **extra_fields)`**: raises a plain `ValueError` (not a DRF
+  validation error) if `email`, `phone_number`, or either name is falsy —
+  this method runs at the model/manager layer, independent of any web
+  framework, so it's the last-resort invariant, not the primary
+  validation path (see `RegisterSerializer`, below, for the HTTP-facing
+  check). Normalizes `email` (`self.normalize_email(...).strip().lower()`)
+  and strips `phone_number`/both names, hashes the password via
+  `set_password`, saves.
+- **`create_superuser(email, password, **extra_fields)`**: defaults
+  `is_staff`/`is_superuser`/`is_active` to `True` and — only if not
+  already supplied — `phone_number` to `"0000000000"`,
+  `first_name`/`last_name` to `"Admin"`/`"User"`, so a purely
+  programmatic call (a script, a data migration) doesn't need to invent
+  values for fields it doesn't care about. Normalizes email the same way.
+- **Fields:** `email` (`EmailField`, `unique=True`); `phone_number`
+  (`CharField`, max 15, **not** unique today — see the migrations section
+  below for how that changed); `first_name`/`last_name` (`CharField`, max
+  30); `is_email` (`BooleanField`, default `False` — see Watch out for);
+  `is_active`/`is_staff`; `date_joined` (`auto_now_add`); `deleted_at`
+  (nullable `DateTimeField`) — the one field the restore-window logic in
+  `accounts/views.py` (`RESTORE_WINDOW_DAYS`) reads to decide whether a
+  restore link is still inside its window. `groups`/`user_permissions`
+  redeclare `PermissionsMixin`'s default M2M fields purely to give them
+  non-clashing `related_name`s (`custom_user_groups`/
+  `custom_user_permissions`) — required whenever `AbstractBaseUser` +
+  `PermissionsMixin` is used directly instead of `AbstractUser`, since
+  `auth.Group`/`auth.Permission` already point a `related_name` at the
+  stock `auth.User` model.
+- `USERNAME_FIELD = "email"`, `REQUIRED_FIELDS = ["phone_number",
+  "first_name", "last_name"]` — read by `manage.py createsuperuser`'s
+  interactive prompts and the Django admin, not by the DRF login flow
+  itself (that uses `CustomTokenObtainPairSerializer`'s own
+  `username_field` override — see `serializers.py` below).
+- **`mark_deleted()`**: sets `is_active=False`, `deleted_at=timezone.now()`,
+  and calls `set_unusable_password()` — Django's mechanism for a password
+  hash that can never match any input, distinct from an empty string —
+  then saves exactly those three fields. Called from `DeleteAccountAPIView`
+  (self-service deactivation). There is no hard-delete/data-erasure path
+  anywhere in this codebase — the row and its order history are retained
+  indefinitely.
+- **`restore(new_password=None)`**: sets `is_active=True`,
+  `deleted_at=None`; if given a password, also hashes and saves it. Used
+  directly only by the model-level tests
+  (`accounts/tests.py`'s `UserSoftDeleteTestCase`) — the real HTTP restore
+  endpoint, `AccountRestoreConfirmAPIView`, does **not** call this method;
+  it inlines the same three-field assignment itself instead (see
+  `views.py`'s Watch out for below).
+- `__str__`: `"{email} ({phone_number})"`.
+
+**`UserProfile`**: one-to-one to `User` (`related_name="profile"`);
+`address_line1`/`apartment`/`city`/`state`/`postal_code`/`country`, all
+`CharField(blank=True, default="")` — never `null`, so an unset address
+field always reads as `""`, never `None`, anywhere downstream; `updated_at`
+(`auto_now`), no `created_at` at all. Nothing creates a `UserProfile` at
+registration time — `ProfileAPIView` (`views.py`) `get_or_create`s one
+lazily on first `GET`/`PUT`, so a brand-new user has zero `UserProfile`
+rows until they first hit `/accounts/profile/`.
+
+**What it talks to:** Django's `auth.Group`/`auth.Permission` (via
+`PermissionsMixin`). Read by `accounts/serializers.py`,
+`accounts/views.py`, `accounts/admin.py`, `orders/models.py` (the `Order.user`
+foreign key), `products/models.py` (`Cart.user`,
+`ProductWishlist.user`, `StockSubscription.user`).
+
+**Watch out for:**
+- **`is_email` looks like dead scaffolding.** It's named as if it tracks
+  "has this user verified their email address," but nothing in
+  `accounts/views.py`, `serializers.py`, `emails.py`, or `urls.py` ever
+  reads or writes it (confirmed by grep across the app) — there is no
+  email-verification flow in this codebase at all. This lines up with the
+  frontend guide's own finding that `templates/emails/accounts/
+  email_verification.txt` is likewise unused: the two look like leftover
+  pieces of the same never-built (or removed) feature.
+- **`phone_number`'s uniqueness has flipped twice.** Migration `0002`
+  made it `unique=True` (with a `RunPython` step backfilling a dummy value
+  for any null rows first); migration `0006` dropped that constraint back
+  to a plain, non-unique `CharField` — matching the model as it reads
+  today. Two different users can share a phone number right now.
+- **`mark_deleted()`/`restore()` are not the only code paths that do
+  this.** `DeleteAccountAPIView` does call `mark_deleted()`, but
+  `AccountRestoreConfirmAPIView` inlines its own
+  `is_active = True; deleted_at = None; ...; save(update_fields=[...])`
+  rather than calling `restore()`. Both end up setting the same fields
+  today, so this is duplication rather than a behavioral gap — but the
+  two paths could silently drift if `restore()` ever grew a new side
+  effect the view wouldn't automatically pick up.
+
+**Interview questions:**
+- *Q: Why does `UserManager.create_user` raise a plain `ValueError` for a
+  missing email/phone/name instead of something DRF-shaped?* — Because
+  this method runs at the model/manager layer, which Django uses
+  independent of any web framework (`createsuperuser`, a data migration,
+  a one-off script) — `RegisterSerializer`'s own field validators are
+  what turn "empty string" into a proper `400` response before
+  `create_user` is ever reached from the API; the manager's `ValueError`
+  is a last-resort invariant, not the primary validation path.
+- *Q: Why is `deleted_at` nullable and separate from `is_active`, instead
+  of relying on `is_active` alone to mean "deleted"?* — `is_active`
+  already has an older, independent meaning in Django (auth backends
+  refuse to authenticate an inactive user, regardless of why), and the
+  restore-window policy needs a timestamp to measure 30 days against —
+  `is_active` alone can say "can this user log in right now," not "when
+  were they deactivated," which is exactly what `RESTORE_WINDOW_DAYS`
+  needs to compare against.
+- **Harder follow-up:** *Q: `mark_deleted()` calls
+  `set_unusable_password()` instead of leaving the existing hash in
+  place. Given the account is already `is_active=False` and can't log in
+  anyway, what does that choice actually buy?* — `is_active=False` blocks
+  authentication through the normal login flow, but it doesn't
+  retroactively invalidate a JWT access token issued **before**
+  deactivation — SimpleJWT tokens are self-contained and remain valid
+  until their own expiry or an explicit blacklist entry (`INSTALLED_APPS`
+  does include `rest_framework_simplejwt.token_blacklist`; **unverified**
+  in this pass whether deactivation actually blacklists anything).
+  Making the password hash unusable means that even if `is_active` were
+  somehow bypassed, or the old password were guessed or leaked elsewhere,
+  the deactivated account still cannot be logged into via password
+  auth — `restore()` (or the equivalent inline code in
+  `AccountRestoreConfirmAPIView`) is the only way back in, and it
+  requires either setting a fresh password or the account already having
+  a usable one restored some other way, so a deactivated account can
+  never be silently reactivated by someone who merely knew the old
+  password.
+
+### `accounts/migrations/`
+
+Six migrations, in order: `0001_initial` creates the custom `User` model
+as it existed at the start (Django 5.1.5, per the header comment).
+`0002` removes a since-abandoned `is_phone_number` field, makes both
+`email` and `phone_number` `unique=True`, and backfills a
+`RunPython(set_default_values)` for any pre-existing null rows before
+tightening the constraint. `0003`/`0004` add and then re-type
+`first_name`/`last_name`. `0005` creates `UserProfile`. `0006` adds
+`deleted_at` and — the one change worth calling out on its own — **drops
+`phone_number`'s `unique=True`** back to a plain `CharField`, reversing
+what `0002` had added; this is the only place in the migration history
+where a constraint was tightened and then deliberately loosened again,
+and it's why `models.py` reads `unique=False` explicitly today rather
+than leaving it implicit.
+
+### `accounts/serializers.py`
+
+**What it is:** `CustomTokenObtainPairSerializer` (login),
+`RegisterSerializer`, `ChangePasswordSerializer`,
+`PasswordResetRequestSerializer`, `PasswordResetConfirmSerializer`,
+`ProfileSerializer` — every input/output validation boundary this app
+uses, in one file (there's no `accounts/views.py`-side ad hoc validation
+except the two account-restore views, which read raw `request.data`
+directly rather than going through a serializer at all — see `views.py`
+below).
+
+**How it works, per class:**
+- **`CustomTokenObtainPairSerializer(TokenObtainPairSerializer)`**: sets
+  `username_field = "email"` so SimpleJWT's login accepts `email`+
+  `password` instead of `username`+`password`. `validate()` lowercases
+  and strips the incoming `email`, maps it onto SimpleJWT's expected
+  `username`/`password` keys, calls `super().validate(attrs)` (which
+  authenticates and issues the token pair), then explicitly re-checks
+  `self.user.is_active` and raises a `ValidationError({"detail": "Account
+  is deactivated. Please restore it via email."}` if it's `False` — this
+  check is **redundant** with Django's own `ModelBackend`, which already
+  refuses to authenticate an inactive user by default (so `super().validate`
+  would typically have already failed before this line is ever reached);
+  it exists to give that failure a specific, on-brand message pointing at
+  the restore flow, rather than SimpleJWT's generic "No active account
+  found with the given credentials" wording. On success, adds a
+  `user: {id, email, first_name, last_name}` object into the response
+  alongside SimpleJWT's standard `{access, refresh}` — this is what
+  `authSlice.ts`'s `normalizeUser` (`tresse_frontend/src/utils/
+  authSlice.ts`) reads its snake_case `first_name`/`last_name` from.
+- **`RegisterSerializer(ModelSerializer)`**: `password`
+  (`write_only`, `min_length=8`), `email` (`EmailField`), `phone_number`
+  (`CharField`); `Meta.fields` also includes `first_name`/`last_name`
+  from the model. `validate_email` rejects a case-insensitive duplicate
+  (`User.objects.filter(email__iexact=email).exists()`) and normalizes
+  the value. `validate_phone_number` just rejects an empty string after
+  stripping — no format/pattern check at all (the frontend's own Yup
+  schema, per the guide's `Register.tsx` entry, adds a phone-number regex
+  client-side; nothing server-side enforces it). `validate_password` runs
+  Django's `validate_password` (common-password/all-numeric/similarity
+  checks, not just the `min_length=8` the field itself already enforces).
+  `create()` re-normalizes email/phone (belt-and-suspenders against
+  anything that bypassed the field validators) and calls
+  `User.objects.create_user(...)`.
+- **`ChangePasswordSerializer(Serializer)`**: `current_password`,
+  `new_password` (`min_length=8`), `confirm_password` (`min_length=8`),
+  all `write_only`. `validate()` checks `new_password == confirm_password`.
+  `validate_new_password` runs `validate_password`. **`save(user)`** is a
+  non-standard signature — a plain `Serializer` has no model to save
+  against automatically, so this class defines its own `save` that takes
+  the `user` explicitly as a parameter (`ChangePasswordAPIView` calls
+  `serializer.save(user=user)`) rather than relying on DRF's usual
+  `instance`/`create`/`update` machinery. It does **not** itself check
+  `current_password` — that check lives in `ChangePasswordAPIView.post`,
+  one layer up, since only the view has `request.user` available to
+  check the password against.
+- **`PasswordResetRequestSerializer(Serializer)`**: one field, `email`
+  (`EmailField`) — pure shape validation; all the "does this user exist,
+  is it active" logic lives in the view.
+- **`PasswordResetConfirmSerializer(Serializer)`**: `uidb64`, `token`
+  (both plain `CharField`), `new_password`/`confirm_password` (both
+  `min_length=8`, `write_only`). Same match-check and
+  `validate_password` pattern as `ChangePasswordSerializer`. Note this
+  serializer has **no** `is_active` awareness at all — the deactivated-
+  account refusal added for [[P0-04]] (in `docs/fixes-2026-09.md`) lives
+  entirely in `PasswordResetConfirmAPIView`, not here.
+- **`ProfileSerializer(Serializer)`**: nine fields
+  (`first_name`/`last_name`/`email` from `User`;
+  `address_line1`/`apartment`/`city`/`state`/`postal_code`/`country` from
+  `UserProfile`), every one `required=False, allow_blank=True` — this is
+  a flat, single serializer spanning two models, matching exactly what
+  `ProfileAPIView.put` needs for a `partial=True` update where any subset
+  of fields may be present. As of [[P1-04]] (in `docs/fixes-2026-09.md`),
+  every field name here is the same snake_case the frontend's own
+  `mapFormToApi`/`mapApiToForm` (`tresse_frontend/src/view/Dashboard.tsx`)
+  already sent and expected — before that fix, `ProfileAPIView` (not this
+  serializer, which was never the problem) read and wrote a mismatched
+  set of camelCase keys server-side, so four of these nine fields were
+  silently dropped on every save despite the frontend having always sent
+  the right shape.
+
+**What it talks to:** `accounts/models.py` (`User`), Django's
+`validate_password` (`django.contrib.auth.password_validation`, governed
+by `tresse/settings.py`'s `AUTH_PASSWORD_VALIDATORS`), SimpleJWT's
+`TokenObtainPairSerializer`. Consumed by every view in `accounts/views.py`
+except the two account-restore views.
+
+**Watch out for:** three different serializers
+(`ChangePasswordSerializer`, `PasswordResetConfirmSerializer`, and
+`accounts/views.py`'s inline `validate_password` call for account
+restore) each independently re-implement the identical
+"`new_password`/`confirm_password` must match, then run
+`validate_password`" pattern — there's no shared mixin or base class
+factoring it out, so a future change to that rule (e.g. adding a
+password-history check) would need to be applied in three separate
+places by hand.
+
+**Interview questions:**
+- *Q: `CustomTokenObtainPairSerializer.validate` re-checks
+  `self.user.is_active` right after calling `super().validate(attrs)`.
+  Given Django's `ModelBackend` already refuses to authenticate an
+  inactive user, when does this second check actually get to run?* —
+  Only if something about `super().validate` in this specific SimpleJWT/
+  Django version combination doesn't itself block an inactive user before
+  returning — in the normal case, `ModelBackend.user_can_authenticate`
+  already raises before this line is reached, making the explicit check
+  effectively unreachable defensive code; it costs nothing to keep and
+  gives a branded error message if that assumption ever stops holding
+  (e.g. a custom auth backend swapped in later that doesn't check
+  `is_active` itself).
+- *Q: Why does `ChangePasswordSerializer.save` take `user` as an explicit
+  argument instead of the serializer being constructed with
+  `instance=user`?* — A plain `Serializer` (not a `ModelSerializer`) has
+  no built-in notion of an instance to update — passing `user` into
+  `save()` directly is simpler than wiring up `instance`/`update()` for a
+  serializer that isn't really modeling `User` as a whole, just three
+  password-related input fields.
+- **Harder follow-up:** *Q: `RegisterSerializer.validate_phone_number`
+  only rejects an empty string — no format check at all. Trace what
+  actually stops a registration with, say, `phone_number: "abc"` from
+  succeeding.* — Nothing does, server-side. `UserManager.create_user`
+  only checks truthiness (`if not phone_number: raise ValueError(...)`),
+  and the `User.phone_number` field itself is a plain, unconstrained
+  `CharField`. The only thing standing between a malformed phone number
+  and a saved row is the frontend's own Yup regex in
+  `components/Register.tsx` — a request built by hand (or by any other
+  client) bypassing that form would register successfully with
+  `phone_number = "abc"`.
+
+### `accounts/throttles.py`
+
+`LoginAnonThrottle`/`LoginUserThrottle`, `RegisterAnonThrottle`/
+`RegisterUserThrottle` — four small `AnonRateThrottle`/`UserRateThrottle`
+subclasses, each naming one rate-limit bucket (`scope`). The actual rates
+live in `tresse/settings.py`'s `DEFAULT_THROTTLE_RATES`
+(`THROTTLE_LOGIN_ANON`, etc.). **Watch out for:** this exact same set of
+four classes is **redefined again**, verbatim, inside `accounts/views.py`
+itself (see below) — this module-level file appears to be unused by
+anything in this app; `accounts/urls.py`'s views all reference the
+classes declared directly in `views.py`, not these. **Unverified**
+whether anything outside `accounts/` imports from this file; a repo-wide
+grep for `from accounts.throttles import` or `from .throttles import`
+inside `accounts/` itself would confirm whether it's dead code
+duplicating four class names that already exist one file over.
+
+### `accounts/middleware.py`
+
+**What it is:** One middleware class, `AuthenticationMiddleware` (a
+locally-defined class with the **same name** as Django's own
+`django.contrib.auth.middleware.AuthenticationMiddleware` — a real,
+easily-confusable naming collision; check `tresse/settings.py`'s
+`MIDDLEWARE` list directly if it matters which one is actually installed
+and in which order relative to the other).
+
+**What it does:** Returns a bare `204` for `/favicon.ico` before anything
+else runs, so a browser's automatic favicon request never reaches
+Django's URL routing or authentication machinery at all. Otherwise, for
+an unauthenticated (`AnonymousUser`) request whose path starts with
+`/api/register`, `/api/login`, `/api/products`, or `/api/reviews`, it
+calls straight through to `get_response(request)`. For every other
+request — authenticated or not, and for an anonymous request to any
+*other* path — it also just calls `get_response(request)`.
+
+**Watch out for:** **the whitelist branch and the fallthrough do exactly
+the same thing.** Both code paths end in `return self.get_response(request)`
+(or the equivalent at the bottom of the function) — the `if` block adds
+no actual short-circuit, no different response, no header, nothing
+observably different from what would happen if this middleware were
+deleted entirely and replaced with `return self.get_response(request)`
+unconditionally. Whatever access control DRF's own `permission_classes`
+per view is already doing (`AllowAny` on `RegisterAPIView`, `login`,
+`ProductViewSet`, etc.) is the actual gate; this middleware's path
+whitelist is inert. **Unverified** whether this was meant to *deny*
+everything else (i.e., the intended logic was probably "if anonymous and
+path is not in this whitelist, refuse" — the exact inverse of what's
+written) and the condition was written backwards, or whether it's
+leftover from an earlier design where the whitelist mattered and the
+`else` branch used to differ; either way, reading this file top to bottom
+gives no functional behavior beyond the `/favicon.ico` short-circuit.
+
+**Interview question:** *Q: What would change, functionally, if this
+entire class body were replaced with just `return self.get_response(request)`
+for every request except `/favicon.ico`?* — Nothing — every branch
+already resolves to exactly that call; the `isinstance(request.user,
+AnonymousUser)`/path-prefix check is dead conditional logic that both of
+its outcomes converge on the same line.
+
+### `accounts/emails.py`
+
+Three plain-text senders, each wrapped in its own
+`try/except Exception: logger.exception(...)` so a template or SMTP
+failure never propagates back to the caller: `send_account_welcome_email`
+(registration), `send_account_deleted_email` (deactivation, with an
+optional `restore_url` — the template hides its restore-link section
+entirely if this is empty, per the frontend guide's own reading of
+`account_deactivated.txt`), and `send_account_restore_email` (the
+restore-request flow). **Cross-reference:** the frontend guide's
+`Backend — email templates` section already documents
+`account_restore.txt`'s **broken filename** in detail (a trailing space
+on disk vs. the exact string this file's `render_to_string` call passes)
+and the fact that no test in `accounts/tests.py` exercises this specific
+function's real template render — every restore-flow test mocks
+`send_account_restore_email` itself rather than letting it run, so the
+broken reference is invisible to the suite. That finding is about this
+exact function; it isn't repeated in full here.
+
+### `accounts/admin.py`
+
+**What it is:** `UserAdmin` (with `UserProfileInline` and a read-only
+`OrderInline` from `orders.models.Order`) and `UserProfileAdmin`.
+
+**How it works:** `UserAdmin.list_display` adds several computed columns
+— `cart_items_count`, `cart_total`, `wishlist_items_count`,
+`orders_count`, `orders_total` — each doing its own query per row (no
+annotation on the changelist queryset itself), so the admin user list is
+`N` extra queries per page, not one. Two bulk actions,
+`send_cart_reminder`/`send_wishlist_reminder`, iterate the selected users
+and call `products/emails.py`'s `send_cart_reminder_email`/
+`send_wishlist_reminder_email` directly, skipping anyone with an empty
+cart/wishlist and reporting sent/skipped/failed counts via
+`self.message_user`.
+
+**Watch out for:** `cart_total`'s per-item loop
+(`product.price * item.quantity` for every `CartItem`) ignores
+`custom_length_surcharge` entirely — unlike `CartItemSerializer`'s own
+snapshot logic (see `products/serializers.py` below), which is what the
+customer-facing cart total actually reflects. An admin looking at this
+column for a cart containing a custom-length item would see a number
+**lower** than what that customer would actually be charged at checkout.
+
+### `accounts/urls.py`
+
+```
+register/                     -> RegisterAPIView              (name: register)
+token/                        -> CustomTokenObtainPairView     (name: token_obtain_pair)
+token/refresh/                -> TokenRefreshView               (name: token_refresh, SimpleJWT's own view)
+change-password/              -> ChangePasswordAPIView         (name: change-password)
+request-password-reset/       -> PasswordResetRequestAPIView   (name: password-reset-request)
+reset-password/confirm/       -> PasswordResetConfirmAPIView   (name: password-reset-confirm)
+restore/request/               -> AccountRestoreRequestAPIView  (name: restore-request)
+restore/confirm/               -> AccountRestoreConfirmAPIView  (name: restore-confirm)
+profile/                       -> ProfileAPIView                (name: profile)
+delete-account/                -> DeleteAccountAPIView          (name: delete-account)
+```
+
+Included at `api/accounts/` by `tresse/urls.py`. **Watch out for:** the
+URL path segments don't always match the frontend's own naming for the
+same action — `restore/request/`+`restore/confirm/` (backend) vs.
+`requestAccountRestore`/`confirmAccountRestore` (frontend function
+names, `api/auth.ts`) is a straightforward match, but
+`reset-password/confirm/` (backend path) is reached by
+`components/PasswordResetConfirm.tsx` posting to
+`/accounts/reset-password/confirm/` directly (not through a
+`api/auth.ts`-style wrapper) — there's no single file on either side that
+lists every path/name pair the way this table does; the mapping only
+exists by each caller matching each view's URL by hand.
+
+### `accounts/views.py`
+
+**What it is:** Every account-facing endpoint's business logic — auth
+(`CustomTokenObtainPairView`, `RegisterAPIView`, `ChangePasswordAPIView`),
+password reset, account restore (request/confirm), the profile
+GET/PUT, and self-service deactivation. Also, unusually for this
+codebase, a **second, duplicate** set of throttle class definitions
+(`PasswordResetAnonThrottle`, `LoginAnonThrottle`, `RegisterAnonThrottle`,
+`RestoreAnonThrottle`, and their `*UserThrottle` counterparts) declared
+directly in this file rather than imported from `accounts/throttles.py`
+— every view below references *these* classes, not the ones in
+`throttles.py` (see that file's own Watch out for).
+
+**Module-level helpers:**
+- **`_recaptcha_enabled()`**: `False` whenever `settings.DEBUG` is truthy
+  (so local/dev runs never require a captcha regardless of whether a
+  secret key is configured), otherwise `True` only if
+  `settings.RECAPTCHA_SECRET_KEY` is set. This is the single gate every
+  captcha-protected view below checks before calling `_verify_recaptcha`.
+- **`_verify_recaptcha(token)`**: short-circuits `True` if captcha isn't
+  enabled at all; otherwise posts the token to Google's
+  `siteverify` endpoint (`requests.post`, 5s timeout) and returns the
+  `success` field, with any exception (timeout, network error, malformed
+  JSON) swallowed and treated as a failed verification (`return False`
+  inside a bare `except Exception`).
+- **`_get_client_ip`**, **`_mask_email`**, **`_from_email`**: logging/
+  display helpers — `_mask_email` keeps the first 1–2 characters of the
+  local part plus the full domain (`"an***@example.com"` for `"anna"`),
+  used only in `logger.info`/`logger.exception` calls, never in a user-
+  facing response.
+- **`RESTORE_WINDOW_DAYS = getattr(settings, "ACCOUNT_RESTORE_WINDOW_DAYS",
+  30)`**: read once at import time (module load), not per-request — a
+  runtime change to the setting (e.g. via `override_settings` in a test
+  that doesn't also reimport this module) would **not** be picked up;
+  `accounts/tests.py`'s restore-window tests instead directly mutate a
+  user's `deleted_at` to be older/younger than the window rather than
+  trying to override this constant.
+
+**`CustomTokenObtainPairView`**: just `serializer_class =
+CustomTokenObtainPairSerializer` plus the login throttles — all the
+actual logic lives in the serializer (above).
+
+**`RegisterAPIView`** (`AllowAny`, register throttles): optional captcha
+check, then `RegisterSerializer`, then `transaction.on_commit(lambda:
+send_account_welcome_email(user.id))` — deferred until the transaction
+that created the row actually commits, so the welcome email can never
+fire for a registration that gets rolled back. Issues a fresh
+`RefreshToken.for_user(user)` pair directly (not by calling the login
+serializer), so registration logs the user in immediately without a
+second request.
+
+**`ChangePasswordAPIView`** (`IsAuthenticated`): validates via
+`ChangePasswordSerializer`, then checks
+`request.user.check_password(current_password)` itself (the serializer
+has no access to `request.user`) before calling `serializer.save(user=user)`.
+
+**Password reset — `PasswordResetRequestAPIView`/`PasswordResetConfirmAPIView`**
+(both `AllowAny`, password-reset throttles): the pair fixed by [[P0-04]]
+(in `docs/fixes-2026-09.md`).
+- **Request**: optional captcha, `PasswordResetRequestSerializer`, then
+  looks the user up by `email__iexact`. **If the user exists but
+  `is_active` is `False`, the code sets the local `user` variable back to
+  `None`** — the exact same generic response
+  (`"If an account with that email exists, a password reset link has
+  been sent."`) is returned either way, and no email is sent for the
+  deactivated case, so this endpoint can't be used to probe whether a
+  given email belongs to a deleted account. Builds the reset link inline
+  (`{FRONTEND_URL}/reset-password/{uidb64}/{token}/`, using Django's
+  `default_token_generator` — the same token mechanism SimpleJWT does
+  **not** use; this is a separate, stateless, time-limited signed token,
+  not a JWT) and sends it via a plain `send_mail` call with an inline
+  f-string body — **not** through a template (`templates/emails/accounts/
+  password_reset.txt` exists on disk but is never rendered by anything,
+  per the frontend guide's `Backend — email templates` finding).
+- **Confirm**: decodes `uidb64` (any exception → the generic
+  `{"detail": "Invalid or expired reset link."}` response), looks the
+  user up by the decoded pk, checks the token via
+  `default_token_generator.check_token`, and — the [[P0-04]] fix — **if
+  `not user.is_active`, refuses with that exact same generic response**,
+  before touching the password at all. Only past that gate does it
+  `set_password`+save. Before this fix, this view unconditionally set
+  `is_active=True; deleted_at=None` on a successful token check, meaning
+  "forgot password" alone could reactivate a deactivated account with no
+  restore-window check whatsoever — see the [[P0-04]] entry in
+  `docs/fixes-2026-09.md` for the full history, including the test that
+  used to pin the old behavior as intentional
+  (`test_confirm_reset_reactivates_deactivated_account`, since removed).
+
+**Account restore — `AccountRestoreRequestAPIView`/
+`AccountRestoreConfirmAPIView`** (both `AllowAny`, restore throttles).
+Neither uses a serializer at all — both read `request.data` directly
+with manual `str(...).strip()` calls, unlike every other view in this
+file.
+- **Request**: looks the user up; the generic response
+  (`_generic_restore_message()`) covers "no such user," "user is
+  already active" (nothing to restore), and "user was deleted more than
+  `RESTORE_WINDOW_DAYS` days ago" (logged via
+  `logger.info("account_restore_expired ...")` before returning the same
+  generic text) — three different reasons for "nothing happens," one
+  indistinguishable response, by design (so the endpoint can't be used to
+  fingerprint account state). Only if the user is inactive *and* still
+  inside the window does it build a restore link and
+  `transaction.on_commit` the email.
+- **Confirm**: the endpoint [[P1-17]] (in `docs/fixes-2026-09.md`)
+  changed. `new_password` is optional here (unlike password reset) —
+  restoring without setting a new password is a valid request shape,
+  since the account may still have a usable password hash from before
+  deactivation... **except it never does**, because `mark_deleted()`
+  always calls `set_unusable_password()` (see `models.py` above) — so in
+  practice, restoring without `new_password` leaves the account
+  `is_active=True` but with **no password anyone can log in with**, and
+  the customer would need a separate password-reset request afterward.
+  If `new_password` **is** given, it's run through Django's
+  `validate_password` (the [[P1-17]] fix — previously only a bare
+  `len(new_password) < 8` check) and any failure returns
+  `{"new_password": [...]}` with `400`, in the **same shape** as
+  `PasswordResetConfirmAPIView`'s equivalent failure. Same `deleted_at`
+  window check as the request view. On success: a single
+  `transaction.atomic()` block sets `is_active=True`, `deleted_at=None`,
+  optionally the new password, and saves — this is the inline duplicate
+  of `User.restore()` mentioned in `models.py`'s Watch out for.
+
+**`ProfileAPIView`** (`IsAuthenticated`): `GET` `get_or_create`s a
+`UserProfile` and returns a flat nine-key snake_case dict (see
+`serializers.py`'s `ProfileSerializer` entry above for the [[P1-04]]
+history). `PUT` validates via `ProfileSerializer(partial=True)`, then, in
+one `transaction.atomic()` block: conditionally updates `User.first_name`/
+`last_name`/`email` (only the keys actually present in the validated
+data — `if "first_name" in v:`, not `if v.get("first_name"):`, so an
+explicit empty string **does** overwrite an existing value, but an
+omitted key never touches the field) with a single `user.save(update_fields=...)`
+guarded by `try/except IntegrityError` (a duplicate email → `400`
+`"This email is already in use."`), then the same field-by-field pattern
+for every `UserProfile` field, then one `profile.save()`. Returns the
+same shape `GET` does, nested under `{"message": ..., "profile": {...}}`.
+
+**`DeleteAccountAPIView`** (`IsAuthenticated`): requires an explicit
+`{"confirm": true}` body (any falsy value → `400`). Inside one
+`transaction.atomic()` block: sets `is_active=False`,
+`deleted_at=now()`, `set_unusable_password()` (the same three fields
+`mark_deleted()` sets — but, like the restore confirm view, this is
+**inlined again** rather than calling `user.mark_deleted()`), clears
+every `UserProfile` address field to `""` via a single `.update(...)`
+call (not a fetch-mutate-save — so this doesn't touch `updated_at`'s
+`auto_now`... **unverified**, since `.update()` does bypass `auto_now`
+by default in Django unless the field is explicitly included, which
+this call doesn't do), builds a restore URL if the user has an email on
+file, and `transaction.on_commit`s the deactivation email (only if
+`email` is truthy — a conditional expression inside the lambda, not a
+separate `if` before scheduling `on_commit` at all).
+
+**What it talks to:** every serializer in `accounts/serializers.py`
+except `CustomTokenObtainPairSerializer` (used by the view class
+directly, not called manually), `accounts/models.py` (`UserProfile`;
+`User` via `get_user_model()`), `accounts/emails.py` (all three
+senders), Django's `default_token_generator`/`urlsafe_base64_encode`/
+`urlsafe_base64_decode` (the reset/restore link tokens), SimpleJWT's
+`RefreshToken`. Frontend: `api/auth.ts` (`loginUser`, `registerUser`,
+`requestAccountRestore`, `confirmAccountRestore`),
+`api/account/ChangePassword.ts` (`changePassword` — though
+`components/PasswordChange.tsx` itself calls `api.post` directly instead
+of that wrapper, per the frontend guide's own finding),
+`components/PasswordResetConfirm.tsx`, `view/Dashboard.tsx` (profile
+GET/PUT, delete-account).
+
+**Watch out for:**
+- The duplicate throttle classes (see above) mean a change to, say,
+  `password_reset_anon`'s scope name would need to be made in **two**
+  files (`accounts/throttles.py` and here) to actually be consistent,
+  even though only the copy in this file is load-bearing.
+- `AccountRestoreRequestAPIView`/`AccountRestoreConfirmAPIView` are the
+  only two views in this app that skip a `Serializer` class entirely —
+  every validation/normalization step (`.strip()`, `.lower()`,
+  `validate_password`) is written out by hand inline, which is why
+  `PasswordResetConfirmSerializer` exists as a *separate, unused-for-restore*
+  serializer even though its shape (`uidb64`, `token`, `new_password`,
+  `confirm_password`) is nearly identical to what restore-confirm reads
+  manually — the restore flow could reuse it (minus `confirm_password`,
+  which restore doesn't ask for) but doesn't.
+- `DeleteAccountAPIView`'s profile-clearing `.update(...)` call runs
+  inside the same transaction as the `User` row's own
+  `save(update_fields=[...])` — but uses Django's queryset `.update()`
+  rather than the ORM instance methods used everywhere else in this file,
+  which is why it doesn't (and can't, without being told to) bump
+  `UserProfile.updated_at`.
+
+**Interview questions:**
+- *Q: Why does `PasswordResetRequestAPIView` set the local `user`
+  variable to `None` for a deactivated account instead of just adding an
+  `if user.is_active:` guard around the email-sending block?* — Both
+  would produce the same "no email sent" outcome, but setting `user =
+  None` makes the rest of the function's `if user:` check do double duty
+  — it already has to handle "no such email" the same way, so collapsing
+  "deactivated" into the same `None` state means there's exactly one
+  branch that decides whether an email goes out, not two separate
+  conditions that both have to independently agree not to send.
+- *Q: `AccountRestoreConfirmAPIView` allows restoring without a
+  `new_password`. What password does the account actually have
+  afterward, given `mark_deleted()`'s behavior?* — None it can log in
+  with — `mark_deleted()` always calls `set_unusable_password()`, so an
+  account restored without supplying a new password comes back
+  `is_active=True` but with an unusable password hash; the customer would
+  need to go through `PasswordResetRequestAPIView`/`Confirm` afterward
+  (which, post-[[P0-04]], now correctly works again once the account is
+  active) to actually be able to log in.
+- **Harder follow-up:** *Q: Both `PasswordResetConfirmAPIView` and
+  `AccountRestoreConfirmAPIView` now run `validate_password` on a new
+  password ([[P0-04]] and [[P1-17]] respectively, in
+  `docs/fixes-2026-09.md`). Django's `UserAttributeSimilarityValidator` —
+  one of the validators in `tresse/settings.py`'s
+  `AUTH_PASSWORD_VALIDATORS` — normally compares a new password against
+  the user's own email/name to catch something like reusing your email as
+  your password. Does either of these two call sites actually get that
+  comparison?* — No — both call the module-level `validate_password(value)`
+  from `django.contrib.auth.password_validation` with **no `user`
+  argument**, which is the same signature `RegisterSerializer` and
+  `ChangePasswordSerializer` use too. Without a `user` passed in,
+  `UserAttributeSimilarityValidator` has nothing to compare against and
+  effectively no-ops for that check specifically (the other validators —
+  minimum length, common-password list, all-numeric — still run
+  normally, since none of them need the user object). This is consistent
+  across every password-setting code path in this app, not a gap unique
+  to restore/reset, but it means "don't let a customer set their own
+  email address as their password" is not actually enforced anywhere in
+  this codebase today.
+
+### `accounts/tests.py`
+
+730 lines, no factory library — every test builds users directly via a
+local `_make_user(email, **kwargs)` helper (defaults: phone
+`"1234567890"`, password `"testpass123"`, name `"Test User"`) and a
+`_make_token_link(user)` helper that mirrors exactly how
+`default_token_generator`+`urlsafe_base64_encode` build a real reset/
+restore link, so tests can construct a valid `(uidb64, token)` pair
+without going through an actual email send. `cache.clear()` runs in every
+API test case's `setUp()` — necessary because the throttle classes here
+key their rate-limit buckets in Django's cache backend, and a leftover
+bucket from an earlier test in the same run would otherwise cause an
+unrelated later test to fail with a `429` it isn't expecting.
+
+**What's mocked, by area:**
+- `_verify_recaptcha` is patched to `return_value=True` in every test
+  that exercises a captcha-gated endpoint (register, password-reset
+  request, restore request) — none of them actually reach Google's
+  `siteverify` endpoint; the `_recaptcha_enabled()` gate itself (`DEBUG`
+  or no secret key configured → disabled) would already skip the real
+  call in the test settings anyway, so these patches are mostly
+  belt-and-suspenders / self-documenting rather than strictly load-bearing
+  (**unverified** without checking `tresse/settings_test.py`'s
+  `RECAPTCHA_SECRET_KEY`/`DEBUG` values directly in this pass).
+- `send_mail`, `send_account_deleted_email`, `send_account_restore_email`,
+  `send_account_welcome_email` are each mocked at their respective test's
+  call site — no test in this file lets a real email attempt reach
+  Django's configured `EMAIL_BACKEND`.
+- The two email-template render tests
+  (`AccountEmailTemplatesRenderTestCase`) are the one exception — they
+  call `render_to_string` for real, against `welcome.txt` and
+  `account_deactivated.txt` specifically (not `account_restore.txt`,
+  which is why that template's broken filename, documented in the
+  frontend guide's email-templates section, is invisible to this suite).
+
+**What's asserted, by area — organized around what each group of tests
+exists to pin down, not a line-by-line list:**
+- **`UserManagerTestCase`**: the three required-field `ValueError`s,
+  email normalization, password hashing, superuser flag defaults.
+- **`UserSoftDeleteTestCase`**: `mark_deleted()`/`restore()` at the model
+  layer directly — `is_active`/`deleted_at`/password-usability
+  transitions in both directions, independent of any HTTP view.
+- **Serializer unit tests** (`RegisterSerializerTestCase`,
+  `ChangePasswordSerializerTestCase`): duplicate-email rejection, weak-
+  password rejection, password mismatch — exercised by constructing the
+  serializer directly with no `APIClient` involved at all.
+- **`RegisterAPITestCase`/`LoginAPITestCase`/`ChangePasswordAPITestCase`**:
+  the ordinary success/failure paths through the real endpoints, plus one
+  test each for the two cross-cutting concerns that matter most here —
+  a deactivated account can't log in
+  (`test_login_deactivated_account_rejected`), and a recaptcha failure
+  blocks registration before a user row is created.
+- **`PasswordResetFlowTestCase`**: this is where the [[P0-04]] fix is
+  pinned directly — `test_request_reset_for_deactivated_account_sends_no_email`
+  and `test_confirm_reset_for_deactivated_account_is_refused` (the latter
+  also asserts the account's password hash is **byte-for-byte unchanged**
+  after the refused attempt, not just that the response was a `400`) sit
+  right alongside the ordinary-flow tests they were added next to,
+  replacing the single test
+  (`test_confirm_reset_reactivates_deactivated_account`) that used to
+  assert the *old*, vulnerable behavior as correct.
+- **`AccountDeleteAndRestoreFlowTestCase`**: the largest single test
+  class in this file. Covers deactivation clearing the profile; restore-
+  request sending an email only for a deactivated account inside the
+  window and staying silent for an active account or one past
+  `RESTORE_WINDOW_DAYS` (mutating `deleted_at` directly to simulate the
+  expired case, rather than mocking `timezone.now()`); restore-confirm
+  reactivating on a valid token and being refused past the window; and
+  — the [[P1-17]] regression tests — a common password (`"password123"`)
+  and an all-numeric one (`"48151623"`) each rejected with Django's
+  specific validator message surfaced in `resp.data["new_password"]`,
+  alongside one test confirming a genuinely strong password
+  (`"Zx9-plum-Harbor-42"`) still restores the account successfully.
+- **`ProfileAPITestCase`**: `GET` auto-creating a profile; a `PUT` using
+  the **exact payload shape** `Dashboard.tsx`'s `mapFormToApi` sends
+  (comment in the test says so directly) round-tripping through a `GET`
+  afterward to confirm every field persisted; `PUT` without `email`
+  (mirroring `mapFormToApi` omitting the key when the field is blank)
+  leaving the existing email untouched rather than clearing it; a
+  duplicate-email `PUT` returning `400`.
+
+**Interview question:** *Q: `test_confirm_reset_for_deactivated_account_is_refused`
+asserts the user's password hash is unchanged, not just that the HTTP
+response was a `400`. Why does that extra assertion matter, given the
+view already returns an error status?* — A `400` response alone doesn't
+prove nothing was written to the database — a bug could return the right
+status code while still calling `set_password`/`save` before the check
+that should have blocked it (e.g. if the `is_active` check were
+accidentally placed after the password-setting code instead of before
+it); asserting the stored hash is byte-for-byte identical to what it was
+before the request is the only way to actually prove the refusal
+happened **before** any mutation, not just that the final response
+happened to look like a rejection.
+
+---
+
+## Backend — products
+
+The largest app in this backend: the product catalog, sizes/stock,
+images, the cart, the wishlist, back-in-stock subscriptions, and the
+email-send log. Several frontend files call directly into it
+(`api/products.ts`, `store/serverCartSlice.ts`, `store/wishListSlice.ts`,
+`view/ProductCatalog.tsx`, `view/ProductDetails.tsx`, `view/WishList.tsx`,
+`view/Dashboard.tsx`'s admin-adjacent reorder is not exposed there but
+`ProductAdmin`'s drag-reorder is) — this section cross-references each by
+path, at the same evidence bar as the rest of this guide.
+
+### `products/models.py`
+
+**What it is:** eleven models: `Category`, `Collection`, `ProductGroup`,
+`Product`, `Size`, `ProductSize`, `ProductImage`, `ProductWishlist`,
+`StockSubscription`, `EmailLog`, `Cart`, `CartItem`, `Review`.
+
+**How it works, by model:**
+- **`Category`**/**`Collection`**: near-identical shape (`name`,
+  unique `slug`) — two separate taxonomies a product can belong to:
+  exactly one `Category` (FK, `on_delete=SET_NULL`) and any number of
+  `Collection`s (`ManyToManyField`). `ProductFilter`'s `category` alias
+  map (`women`/`men`/`kids` → `woman`/`man`/`kids`, see `filters.py`
+  below) is the only place category slugs are normalized against a fixed
+  vocabulary; nothing at the model layer constrains what a `Category`'s
+  `slug` actually is.
+- **`ProductGroup`**: the mechanism behind "this product comes in five
+  colors" — a `Product` optionally belongs to one `ProductGroup`
+  (`on_delete=SET_NULL`), and every other `Product` in the same group is
+  treated as a **color variant** of it (see `ProductColorVariantSerializer`,
+  below). A product with no group is its own, single-member group in
+  effect (`ProductSerializer.get_variants` falls back to
+  `Product.objects.filter(id=obj.id)` when `group_id` is unset).
+- **`Product`**: the central model. `ReturnPolicy` (a `TextChoices`:
+  `standard`/`final_sale`/`non_returnable_hygiene`) is **snapshotted onto
+  every `OrderItem`** at checkout time (`orders/views_stripe.py`, outside
+  this app) — this field is the live, editable source of truth; the
+  snapshot on a past order is frozen at whatever it was when that order
+  was placed, so changing a product's return policy today never
+  retroactively changes an existing order's return eligibility. Two
+  separate, **overlapping** stock-related booleans exist at the product
+  level: `available` (hand-set, "should this product be shown/sellable
+  at all") and `in_stock` (also hand-set, on the model) — but the
+  serializers and filters never read `Product.in_stock` directly; they
+  compute their own `in_stock` from `ProductSize.quantity` instead (see
+  `ProductFilter.filter_in_stock` and `ProductSerializer.get_in_stock`,
+  both below) — `Product.in_stock` the field looks unused by any read
+  path, only ever written (see Watch out for). `allows_custom_sizing` is
+  a plain boolean with **no corresponding size/measurement data on the
+  model at all** — the actual custom-size mechanism is a `Size` row
+  literally named `"CUSTOM SIZE"` (string-matched, not modeled as a
+  distinct type — see `ProductFilter`'s custom-size handling references
+  elsewhere in this codebase, and `CartItemSerializer`'s custom-length
+  logic below for the *sibling* mechanism this field doesn't gate).
+  `allows_custom_length`/`custom_length_cm`/`custom_length_surcharge` are
+  the fields that actually matter for `CartItemSerializer`'s
+  server-side snapshot (below) — `custom_length_cm` defaults to `10`,
+  `custom_length_surcharge` defaults to `35` (a flat dollar amount, not a
+  percentage). `Meta.ordering = ("sort_order", "-created_at", "id")` —
+  the same three-key ordering `ProductViewSet` explicitly repeats as its
+  own `ordering` list (redundant, but consistent).
+- **`Size`**: just a unique `name` — no fixed enum; `"CUSTOM SIZE"`,
+  `"ONE SIZE"`, and every numeric/lettered size are all plain rows in
+  this same table, distinguished only by string comparison wherever code
+  needs to special-case one (`_normalize_size_label`/`CUSTOM_SIZE_LABEL`
+  in `orders/views_stripe.py`, `products/filters.py`'s category handling
+  is unrelated but the same "string-matched special value" pattern
+  recurs across this codebase).
+- **`ProductSize`**: the `(product, size)` join row that actually carries
+  `quantity` — this is the real stock ledger; `Product.in_stock` and
+  `Product.available` are coarser, separate flags that don't derive from
+  it automatically. **Carries the zero-to-positive restock detection
+  mechanism directly on the instance**: `__init__` stashes
+  `self.__original_quantity = self.quantity` (name-mangled to
+  `_ProductSize__original_quantity` by Python, since the double-underscore
+  prefix is written inside this class's own body) for a freshly
+  **constructed** (not loaded) instance, and the classmethod override
+  `from_db` does the same for an instance **loaded** from the database —
+  the two code paths exist because `__init__` alone would only see the
+  value passed to a plain `ProductSize(...)` constructor call, not what
+  was actually in a row fetched from the database and about to be
+  mutated+saved; `from_db` is Django's documented hook for exactly this
+  "I need to know a field's value as it was read from the DB, before any
+  in-memory changes" use case. `products/signals.py`'s `post_save`
+  handler is the only code that reads this mangled attribute (see below)
+  — `unique_together = ("product", "size")`.
+- **`ProductImage`**: `image` (required `ImageField`, unlike
+  `Product.color_swatch_image`/`main_image`, which are both nullable) +
+  `alt_text`, `is_primary`, `sort_order`. `Meta.ordering = ("sort_order",
+  "id")` — the same ordering `get_product_main_image_url`
+  (`serializers.py`) explicitly re-applies with its own `.order_by(...)`
+  call rather than relying on this default (defensive, since `.first()`
+  on an already-default-ordered queryset would behave the same either
+  way — belt-and-suspenders, not a bug). Has its own `image_url` Python
+  `@property` (`try: return self.image.url; except Exception: return ""`)
+  — this is a **third, independent** copy of the "guard `.url` access"
+  pattern also implemented in `serializers.py`'s
+  `get_product_main_image_url` and (as of the "Catalog 500 on unguarded
+  image URLs" fix, `docs/fixes-2026-09.md`) `ProductImageSerializer.get_image_url`
+  — **this model property itself is never actually called from
+  anywhere in `serializers.py` or `views.py`** (confirmed by grep — the
+  serializer defines and uses its own `get_image_url` method instead,
+  duplicating rather than delegating to this property); it's read only
+  by `products/admin.py`'s `ProductImageInline.preview` (a **different**,
+  fourth guard, written independently rather than calling this property
+  either — see `admin.py` below).
+- **`ProductWishlist`**/**`StockSubscription`**: both simple join-style
+  models (`user`+`product`, and `product`+optional `user`+`email`
+  respectively) with `unique_together` preventing a duplicate row —
+  this is what makes `get_or_create` in both `WishlistViewSet`/
+  `ProductViewSet.wishlist` and `subscribe_back_in_stock` (`views.py`,
+  below) a true idempotent operation rather than one that merely happens
+  not to duplicate in practice. `StockSubscription.notified_at` is the
+  field `products/signals.py` sets once an email actually goes out —
+  it's what makes a subscriber only ever notified once per restock cycle,
+  not once per size/purchase event.
+- **`EmailLog`**: a generic outbox record (`email_type` choices include
+  `back_in_stock`/`cart_reminder`/`wishlist_reminder`/`password_reset`/
+  `order_confirmation`/`other`) written by `products/emails.py`'s
+  `send_email_with_log` — but **only the three sends that actually go
+  through that helper** (back-in-stock, cart reminder, wishlist reminder,
+  all from this same app) ever create a row here; `password_reset` and
+  `order_confirmation` are listed as valid `email_type` choices but
+  nothing in `accounts/` or `orders/` ever imports or calls
+  `send_email_with_log` — those two choices exist in the enum with no
+  code path that would ever produce a row using them (**unverified**
+  whether this was aspirational/for a future audit trail, or a leftover
+  from before those two apps had their own separate send functions).
+- **`Cart`**: one-to-one with `User` (`related_name="cart"` — a user can
+  have at most one cart, enforced at the DB level by the `OneToOneField`
+  itself). **`CartItem`**: the line items — see `serializers.py`'s
+  `CartItemSerializer` entry (below) for the field that matters most,
+  the custom-length snapshot. `Meta.ordering = ("id",)` — insertion
+  order, not e.g. by product name.
+- **`Review`**: `unique_together = ("product", "user")` — one review per
+  user per product — but **nothing anywhere in this backend exposes a
+  create/list endpoint for this model at all**, confirmed by a
+  repo-wide search for `review`/`Review` outside `products/models.py`
+  and `products/admin.py` (only `ReviewAdmin` and the model's own
+  migration history reference it). `accounts/middleware.py`'s whitelist
+  even name-checks `/api/reviews` as an always-allowed anonymous path
+  (see that file's own entry above), but no app in this project defines
+  a URL under that path — it's genuinely unreachable scaffolding, a
+  feature whose model and admin were built but whose API was either
+  never written or was removed without touching the model, admin, or
+  middleware whitelist that still reference it.
+
+**What it talks to:** `settings.AUTH_USER_MODEL` (`accounts.User`, via
+`Cart`/`ProductWishlist`/`StockSubscription`/`Review`). Read throughout
+`products/serializers.py`, `views.py`, `admin.py`, `signals.py`, and by
+`orders/models.py`/`orders/views_stripe.py` (which reads `Product`/
+`ProductSize`/`CartItem` directly when building an order from a paid
+checkout — outside the scope of this section).
+
+**Watch out for:**
+- **`Product.in_stock` and `Product.available` are both hand-set fields
+  that nothing derives automatically, and `in_stock` specifically looks
+  write-only from every read path this section found.** An admin could
+  toggle `Product.in_stock` to `True` for a product with zero `ProductSize`
+  quantity anywhere, and every customer-facing view
+  (`ProductFilter.filter_in_stock`, `ProductSerializer.get_in_stock`)
+  would still correctly compute "out of stock" from the real
+  `ProductSize` rows and ignore the flag entirely — the field isn't
+  wrong, it's just not load-bearing for anything a customer sees.
+- **Four independent implementations of "guard a possibly-raising
+  `.url` access"** exist across this codebase for image fields:
+  `ProductImage.image_url` (this file, a model `@property`, unused by
+  the serializers), `get_product_main_image_url` and
+  `ProductImageSerializer.get_image_url`/`ProductSerializer.get_color_swatch_url`/
+  `ProductColorVariantSerializer.get_color_swatch_url` (`serializers.py`,
+  the ones actually wired to API responses, three of which needed the
+  "Catalog 500 on unguarded image URLs" fix), and
+  `ProductImageInline.preview`/`ProductAdmin.color_preview`
+  (`admin.py`, admin-only). None of the four call each other.
+- **`ProductSize.__original_quantity`'s name-mangling is a real trap for
+  a naive reader or a future refactor.** Writing `instance._ProductSize__original_quantity`
+  in `signals.py` (a different module) only works because Python's name
+  mangling is purely lexical (based on which class body the
+  double-underscore identifier is written inside, not on any runtime
+  access-control) — `signals.py`'s own comment says this explicitly, but
+  renaming the private attribute in `models.py` without updating
+  `signals.py`'s hardcoded mangled string would silently break restock
+  detection with no error at all (the `getattr(instance,
+  "_ProductSize__original_quantity", None)` call would just always
+  return the default `None`, which `notify_when_back_in_stock` treats
+  the same as "no prior value to compare, not a genuine restock" — so
+  the failure mode is **silent under-notification**, not a crash).
+
+**Interview questions:**
+- *Q: Why does `ProductSize` need both an `__init__` override and a
+  `from_db` classmethod override to track its original quantity, instead
+  of just one or the other?* — `__init__` runs for every instance
+  construction, including a fresh `ProductSize(...)` call that was never
+  loaded from the database (e.g. inside `ProductSizeInline`'s "add new"
+  form) — for that case there's no "original" DB value to speak of, so
+  the current `self.quantity` at construction time is the closest
+  approximation. `from_db` is Django's hook specifically for "this
+  instance was just materialized from a database row" — it has access
+  to the actual field values as stored, which is what the signal handler
+  needs to compare against after an in-memory mutation and `.save()`.
+  Without `from_db`, `Product.objects.get(...)` followed by
+  `instance.quantity = 5; instance.save()` would have no reliable record
+  of what the quantity was *before* that assignment.
+- *Q: `Product.ReturnPolicy` is snapshotted onto `OrderItem` at checkout.
+  Walk through what happens if a product's return policy is changed from
+  `standard` to `final_sale` the day after a customer's order shipped.*
+  — Nothing changes for that existing order — `orders/views_stripe.py`
+  copies `product.return_policy` onto the `OrderItem` row at the moment
+  the order is created from a paid checkout session, and every
+  return-eligibility check downstream (`orders/views.py`'s
+  `RequestReturnAPIView`, `orders/admin.py`'s `approve_return`) reads
+  that frozen `OrderItem.return_policy`, never `Product.return_policy`
+  live — a policy change only affects orders placed **after** the
+  change.
+- **Harder follow-up:** *Q: Two concurrent requests both call
+  `ProductSize.objects.get(pk=X)`, both see `quantity=0`, and both then
+  set `quantity=5` and save — is there a race where the restock
+  notification could fire twice, once per request?* — Both `from_db`
+  calls independently capture `previous_quantity=0` for their own
+  in-memory instance, so **yes**, both saves would independently satisfy
+  `previous_quantity == 0 and instance.quantity > 0` and each would
+  trigger `notify_when_back_in_stock`'s `transaction.on_commit` — the
+  signal handler itself has no locking. In practice, `StockSubscription.notified_at`
+  provides the actual guard against a subscriber being emailed twice:
+  each of the two signal invocations queries
+  `StockSubscription.objects.filter(product=product, notified_at__isnull=True)`
+  independently and (barring a second race on the `notified_at` write
+  itself, which isn't `select_for_update`-guarded here either) the first
+  one to actually execute its `sub.save(update_fields=["notified_at"])`
+  wins; the second invocation's own loop would still have queried the
+  subscription list **before** the first one wrote `notified_at`
+  (both queries can run before either save, since neither is locked), so
+  a genuine double-send is possible under real concurrency — this
+  specific race is **unverified** against a real concurrent test in
+  `products/tests.py`'s `StockSignalTestCase`, which only tests
+  sequential saves.
+
+### `products/migrations/`
+
+Twenty-three migrations. The broad strokes: `0001_initial` creates the
+core catalog shape; `0002`–`0004` are pure data migrations
+(`RunPython`) seeding `Size` rows, an initial product catalog, and a
+`"ONE SIZE"` row — none of them touch schema. `0005`/`0015` add and
+later re-add `Product.main_image` (it was briefly removed by `0014` and
+brought back by `0015` — a genuine back-and-forth, not a typo in this
+summary). `0006`/`0007` add and backfill `Category.slug`. `0008`/`0009`
+add two indexes and then remove them again one migration later. `0010`
+creates `ProductWishlist`/`StockSubscription`. `0012` adds `Collection`
+and the `color_swatch_image`/`color_name`/`color_hex` fields (later
+folded into `0016`'s fuller color-variant/`ProductGroup` shape — the
+model as it reads today). `0013`/`0014` are large `AlterModelOptions`/
+`AlterUniqueTogether` sweeps (ordering and constraint cleanup across
+several models at once) — `0014` also removes `main_image` (see above)
+and adds `care_instructions`/`Product.in_stock`/
+`StockSubscription.notified_at`. `0017` adds `EmailLog`. `0018`/`0023`
+add the seven `CartItem` custom-measurement fields and, separately, the
+custom-length fields — in two different migrations despite both being
+"custom X" fields on the same model, because `allows_custom_length`
+shipped later than the bust/waist/hips measurement fields did. **`0019`
+is worth calling out on its own**: it drops `CartItem`'s
+`unique_together` (added one migration earlier, in `0018`) back to no
+constraint at all — this is *why* `CartItemSerializer._get_other_cart_quantity`
+(below) has to sum quantity across **multiple** `CartItem` rows for the
+same `(cart, product_size)` pair rather than being able to assume at
+most one row exists; without `0019`, that summing logic would be dead
+code guarding against a case the database itself wouldn't allow. `0020`–
+`0022` add `sort_order`, tighten `Product`'s default ordering, and add
+`return_policy`.
+
+### `products/apps.py` and `products/signals.py`
+
+**What they are, together:** the entire back-in-stock notification
+mechanism — `apps.py`'s `ProductsConfig.ready()` is the **only** place
+`signals.py` is ever imported (`from . import signals  # noqa: F401`,
+inside `ready()`), which is what actually connects the `@receiver`
+decorator in `signals.py` to Django's signal dispatcher; without this
+import, the `@receiver(post_save, sender=ProductSize)` decoration in
+`signals.py` would simply never execute and the whole mechanism would be
+silently inert — this was, in fact, exactly the [[P0-01]] bug (in
+`docs/fixes-2026-09.md`): the signal handler function existed and was
+correctly written, but nothing ever imported the module that defined it,
+so no restock email was ever sent, for any product, ever, until this
+`ready()` hook was added.
+
+**How `notify_when_back_in_stock` works, step by step:**
+1. Reads `instance._ProductSize__original_quantity` (the mangled
+   attribute `models.py`'s `__init__`/`from_db` set — see that file's
+   own Watch out for on the name-mangling itself) as `previous_quantity`,
+   defaulting to `None` if it's somehow absent.
+2. **Immediately overwrites it** with the just-saved `instance.quantity`
+   — so if this same in-memory `instance` were saved again later in the
+   same request/process without being re-fetched from the DB, the *next*
+   `post_save` firing would compare against *this* save's value, not the
+   original one from before either save. This is what makes the "genuine
+   zero-to-positive restock, not a purchase decrement, not an admin edit
+   that doesn't cross zero" distinction actually hold across multiple
+   saves of the same instance, not just the first one.
+3. `if instance.quantity <= 0: return` — no notification for a save that
+   leaves stock at zero or negative (the field is a
+   `PositiveIntegerField`, so negative shouldn't be reachable in
+   practice, but the check doesn't assume that).
+4. `if previous_quantity is None or previous_quantity > 0: return` —
+   this is the [[P0-02]] guard (in `docs/fixes-2026-09.md`): before it
+   existed, **every** save that left quantity positive would notify,
+   including a product going from `quantity=3` to `quantity=5` (an
+   ordinary restock top-up with no subscriber-relevant "it was
+   unavailable and now isn't" transition) or even a purchase that
+   decremented from `5` to `4` (which, before the fix, could apparently
+   still satisfy whatever the original condition was — the fixes
+   documentation is the authoritative source for the exact shape of the
+   pre-fix bug; this section states the **current** condition as read
+   from the code). `previous_quantity is None` also matters for a
+   freshly **created** row (via `admin`'s inline formset, or a script) —
+   there's no "previous" value at all for a `ProductSize` that's being
+   inserted for the first time with, say, `quantity=5`; that case is
+   explicitly treated as *not* a restock (no subscriber could have
+   subscribed to a size that didn't exist yet).
+5. Queries `StockSubscription.objects.filter(product=product,
+   notified_at__isnull=True)` — every subscriber for the **product**
+   (not the specific `ProductSize`/size that restocked — a subscription
+   is per-product, not per-size, so a customer who subscribed while, say,
+   a Medium was out of stock gets notified when a Small restocks too,
+   even if Medium is still at zero).
+6. `if not subscriptions.exists(): return` — a query just to short-
+   circuit before building the product URL and the `transaction.on_commit`
+   closure, avoiding that setup work for the (presumably common) case of
+   a restock with no waiting subscribers.
+7. Builds `product_url` once, outside the closure, then defines
+   `_send_after_commit()` — a per-subscription loop, each iteration
+   wrapped in its own `try/except Exception: logger.exception(...)`, so
+   one subscriber's email failing (a bad address, a transient SMTP error)
+   doesn't stop the rest of the list from being processed. Each success
+   sets `sub.notified_at = timezone.now()` and saves **immediately**,
+   inside the loop, not batched at the end — so a failure partway through
+   a long subscriber list leaves the already-succeeded ones correctly
+   marked and only the remainder eligible for a future retry (there is no
+   retry mechanism in this codebase; "eligible for a future retry" means
+   "the next time this exact product crosses zero-to-positive again,"
+   not an automatic re-attempt).
+8. The entire closure is scheduled via `transaction.on_commit`, not run
+   inline — so if the save that triggered this signal is itself rolled
+   back (part of a larger failed transaction elsewhere), no email is
+   ever sent for a stock change that never actually persisted.
+
+**What it talks to:** `products/emails.py` (`send_back_in_stock_email`),
+`products/models.py` (`ProductSize`, `StockSubscription`). Frontend:
+nothing calls this directly — it's entirely server-triggered, by any
+code path that saves a `ProductSize` with a higher quantity (an admin
+edit via `ProductSizeInline`, or — outside this app —
+`orders/views_stripe.py`'s Stripe webhook decrementing stock on a
+purchase, which is a decrease, never itself the trigger).
+
+**Watch out for:** per the "Harder follow-up" interview question in
+`models.py`'s section above, this handler has **no explicit locking**
+around either the restock-detection comparison or the
+`notified_at`-write race between concurrent saves of the same
+`ProductSize` — in practice, a genuine simultaneous double-save of the
+exact same size row is a narrow window (an admin manually editing stock
+concurrently with... itself, or with a purchase's own decrement landing
+at the same instant on the same row, which is a decrease and wouldn't
+trigger this path anyway), so the theoretical double-notification risk
+is real but not the most likely failure mode this mechanism has already
+had (that was [[P0-01]]/[[P0-02]], both about the handler never firing
+or firing too eagerly, not about firing twice).
+
+**Interview questions:**
+- *Q: Why is the subscriber loop's `try/except` **inside** the loop, per
+  subscription, rather than one `try/except` around the whole
+  `_send_after_commit` function?* — So one bad email address or one
+  transient send failure doesn't abort the entire batch — with the
+  `try/except` per-iteration, a list of ten subscribers where the third
+  one fails still successfully notifies (and marks `notified_at` for) the
+  other nine; a single outer `try/except` would stop at the first failure
+  and leave subscribers four through ten un-notified even though nothing
+  was actually wrong with their own addresses.
+- *Q: What would happen if `apps.py`'s `ready()` method were deleted
+  entirely, with `signals.py` left completely unchanged?* — Exactly the
+  [[P0-01]] bug: `signals.py`'s `@receiver` decorator only takes effect
+  when the module containing it is imported somewhere Django actually
+  executes — with no import anywhere, the decorator line never runs, no
+  signal gets connected, `ProductSize.save()` calls proceed completely
+  normally with no side effect, and no back-in-stock email is ever sent
+  for any product, with no error, warning, or any other visible symptom
+  — the code all looks correct in isolation, which is exactly why this
+  class of bug is easy to miss without a test that actually exercises
+  `.save()` through the real Django app registry (which
+  `StockSignalTestCase`, using `TestCase` and the real app config, does).
+- **Harder follow-up:** *Q: `StockSignalTestCase`'s tests all wrap the
+  triggering `.save()` in `self.captureOnCommitCallbacks(execute=True)`.
+  What would each of those tests actually observe if that wrapper were
+  removed?* — `transaction.on_commit` callbacks are deferred until the
+  enclosing transaction actually commits — Django's `TestCase` wraps
+  every test method in a transaction that's rolled back at the end (for
+  isolation between tests), so absent `captureOnCommitCallbacks`,
+  `_send_after_commit` would **never run** during the test at all (the
+  "commit" it's waiting for never happens inside a `TestCase`), and every
+  assertion checking `mock_send.assert_called_once()`/
+  `notified_at is not None` would fail — not because the signal logic is
+  wrong, but because the test harness's own transactional isolation
+  would silently prevent the deferred callback from ever firing.
+
+### `products/throttles.py`
+
+`StockSubscribeAnonThrottle`/`StockSubscribeUserThrottle` — two classes,
+`scope = "stock_subscribe_anon"`/`"stock_subscribe_user"`. Used only by
+`ProductViewSet.subscribe_back_in_stock` (`views.py`, below). Unlike
+`accounts/throttles.py`, there's no duplicate copy of these classes
+anywhere else in this app.
+
+### `products/filters.py`
+
+**What it is:** `ProductFilter(django_filters.FilterSet)` — the
+`filterset_class` both `ProductViewSet` and `WishlistViewSet` use.
+
+**How it works:** `category` (a `CharFilter` with a custom `method`, not
+a direct field match) accepts a slug **or** one of a fixed alias map
+(`women`/`womens`/`woman` → `woman`; `men`/`mens`/`man` → `man`;
+`kid`/`kids` → `kids`), lowercased and stripped before lookup —
+case-insensitive (`iexact`) against `Category.slug`. `available`
+(`BooleanFilter`, direct field). `in_stock` (a `BooleanFilter` with a
+custom `method`): builds an `Exists(ProductSize.objects.filter(product_id=OuterRef("pk"),
+quantity__gt=0))` subquery and filters on it — this is the query-layer
+twin of `ProductSerializer.get_in_stock`'s Python-level
+`obj.sizes.filter(quantity__gt=0).exists()` fallback (below); both
+compute the exact same thing, once as a filter and once as a serialized
+field, independently. `min_price`/`max_price` (`gte`/`lte` on `price`).
+`collection` (`iexact` on `collections__slug`).
+
+**What it talks to:** `products/models.py` (`Product`, `ProductSize`).
+Used by `products/views.py`'s `ProductViewSet`/`WishlistViewSet`
+(`filterset_class = ProductFilter`). Frontend: `api/products.ts`'s
+`fetchProducts` passes `category`/`collection`/`in_stock`/`min_price`/
+`max_price` straight through as query params.
+
+**Watch out for:** the frontend guide's own `api/products.ts` entry
+flags a related concern from that side — `products/views.py`'s
+`ProductViewSet.get_queryset` **also** filters `category`/`collection`
+by hand (`if category_slug: queryset = queryset.filter(category__slug=category_slug)`),
+in addition to this `FilterFilter`'s own handling, and **only this
+class's `filter_category` method knows the alias map** — the manual
+filter in `get_queryset` does an exact `category__slug=category_slug`
+match with no aliasing at all. Both filters run (DRF applies every
+configured filter backend), so a request with `?category=woman` (the
+canonical slug) is filtered identically twice — redundant but harmless —
+while `?category=women` (an alias) is filtered correctly by
+`ProductFilter` but then **also** filtered again by `get_queryset`'s
+literal `category__slug="women"` match, which would find nothing, since
+no `Category` row actually has the slug `"women"`. Confirmed directly in
+this pass: `get_queryset`'s manual filtering runs on the same queryset
+`ProductFilter` will filter afterward via `filter_backends`/
+`filterset_class`, and Django QuerySet filters are additive (`AND`ed)
+— so `?category=women` should currently return **zero products**, since
+the manual `category__slug="women"` clause alone (with no matching
+category) empties the queryset before `ProductFilter` even gets a
+chance to apply its own, correct aliasing.
+
+**Interview question:** *Q: Given the manual filtering in
+`get_queryset` and `ProductFilter`'s own `filterset_class` wiring both
+apply to the same request, why doesn't `?category=woman` (the actual
+slug, not an alias) break the same way `?category=women` does?* — Because
+`get_queryset`'s manual clause uses the literal query param value
+directly (`category__slug=category_slug`) — for the canonical slug
+itself, that manual filter and `ProductFilter`'s aliased filter (which
+maps `"woman"` to itself, a no-op through the alias table) both resolve
+to the identical `category__slug="woman"` condition, so `AND`ing two
+identical filters together is redundant but not destructive; it's only
+an **alias** value where the manual filter's un-aliased literal match
+diverges from what `ProductFilter` correctly resolves it to, and the
+`AND` of "the right filter" with "a filter for a slug that doesn't
+exist" is what empties the result.
+
+### `products/emails.py`
+
+**What it is:** `send_email_with_log` (the shared low-level sender +
+`EmailLog` writer), plus three call sites:
+`send_back_in_stock_email` (template-rendered, `templates/emails/products/
+back_in_stock.txt`), `send_cart_reminder_email`/`send_wishlist_reminder_email`
+(both build their body as an inline f-string, **no template file at
+all** — the frontend guide's own `Backend — email templates` section
+notes this explicitly: these two are the only email sends in the
+backend that skip `render_to_string` entirely).
+
+**How `send_email_with_log` works:** builds an `EmailMessage` (not
+`EmailMultiAlternatives` — plain text only, like every email in this
+backend except `newsletter_welcome`), sends it, and — **inside the same
+`try` block as the send itself** — writes an `EmailLog` row reflecting
+whether `msg.send(fail_silently=False)` returned a truthy result. If
+`send()` raises, the `except` branch writes a **`status="failed"`**
+`EmailLog` row with the exception's `str()` as `error_message`, then
+**re-raises** — unlike every sender in `accounts/emails.py`/
+`orders/emails.py`, which all swallow their own exceptions behind a bare
+`except Exception: logger.exception(...)`, this function's callers
+(`send_back_in_stock_email`, called from `products/signals.py`'s own
+`try/except` — see that file above; `send_cart_reminder_email`/
+`send_wishlist_reminder_email`, called from `accounts/admin.py`'s bulk
+actions, which have their **own** `try/except` per user) are each
+responsible for catching the re-raised exception themselves. This is the
+one email-sending module in the backend that doesn't self-contain its
+own failure.
+
+**What it talks to:** `products/models.py` (`EmailLog`, `Product`).
+Called from `products/signals.py` (back-in-stock) and
+`accounts/admin.py`'s two bulk actions (cart/wishlist reminders — see
+that file's own entry above).
+
+**Watch out for:** `send_email_with_log` silently returns (no send, no
+`EmailLog` row, no exception) if `to_email` is falsy — there's no log
+entry at all for "we tried to email someone but had no address," which
+means an `EmailLog`-based audit of send attempts can't distinguish
+"never attempted because we had no address" from "genuinely never
+triggered" — both simply produce zero rows.
+
+### `products/serializers.py`
+
+**What it is:** thirteen serializers spanning the whole catalog + cart
+surface: `ProductImageSerializer`, `CategorySerializer`,
+`CollectionSerializer`, `ProductGroupSerializer`, `SizeSerializer`,
+`ProductSizeInlineSerializer`, `ProductMiniSerializer`,
+`ProductColorVariantSerializer`, `ProductSerializer`,
+`ProductSizeSerializer`, `CartItemSerializer`, `CartSerializer` — plus
+three module-level helper functions (`force_https`, `build_abs_https`,
+`get_product_main_image_url`).
+
+**The image-URL helpers, first, since three serializers depend on
+them:**
+- **`force_https(url)`**: rewrites an `http://` URL's scheme to
+  `https://` (via `urlparse`/`urlunparse`); leaves a schemeless value
+  (a bare relative path) and anything already `https://` untouched.
+- **`build_abs_https(request, url)`**: if `url` starts with `/` and a
+  `request` is available, calls `request.build_absolute_uri(url)` first
+  (turning a storage-relative path into a full URL against the current
+  host), then always runs the result through `force_https`. Without a
+  `request` in context (e.g. a serializer instantiated outside a view,
+  as some tests do), a relative URL stays relative.
+- **`get_product_main_image_url(obj, request)`**: tries the first
+  `ProductImage` (by `sort_order`, `id`) if one exists and has a file,
+  falling back to `Product.main_image` if not, returning `None` if
+  neither yields a URL — **both** branches are individually wrapped in
+  their own `try/except Exception: pass` (silent, no logging) rather
+  than one `try/except` around the whole function, so a broken first
+  image doesn't prevent falling through to try `main_image` as a second
+  chance. This function predates, and was the template for, the
+  "Catalog 500 on unguarded image URLs" fix (`docs/fixes-2026-09.md`) —
+  the three serializer methods that fix touched (`ProductImageSerializer.get_image_url`,
+  `ProductSerializer.get_color_swatch_url`,
+  `ProductColorVariantSerializer.get_color_swatch_url`) were brought up
+  to the same "never let `.url` raise past this function" standard this
+  one already met, **except** those three now also call
+  `logger.exception(...)` before returning `None`, which this original
+  function still does not — a real, if minor, inconsistency: the
+  original pattern this fix was modeled on is stricter about silence
+  than the fix itself ended up being.
+
+**`ProductImageSerializer`**: `id`, `image_url` (`SerializerMethodField`,
+guarded per the fix above), `sort_order`, `alt_text`, `is_primary`. Used
+nested inside `ProductSerializer.images` (`many=True`).
+
+**`CategorySerializer`/`CollectionSerializer`/`ProductGroupSerializer`**:
+near-identical three-field passthroughs (`id`, `name`, `slug`).
+
+**`SizeSerializer`**: `id`, `name`. **`ProductSizeInlineSerializer`**:
+nests `SizeSerializer` (read-only) plus `id`, `quantity` — used inside
+`ProductSerializer.sizes`. **`ProductSizeSerializer`** (a different,
+top-level serializer, not the inline one above) additionally nests a
+full `ProductMiniSerializer` for `product` — used only inside
+`CartItemSerializer.product_size` (below), which is why a cart line's
+`product_size` payload is much richer than the plain
+`ProductSizeInlineSerializer` nested under a product listing.
+
+**`ProductMiniSerializer`**: `id`, `name`, `price`, `return_policy`,
+`allows_custom_length`, `custom_length_cm`, `custom_length_surcharge`,
+`main_image_url` — a deliberately trimmed `Product` view (no `category`,
+`images` list, `variants`, wishlist state, etc.) used specifically where
+a cart line needs just enough product context to render and to know
+whether custom-length applies, without the full catalog payload's
+weight.
+
+**`ProductColorVariantSerializer`**: `id`, `name`, `color_name`,
+`color_hex`, `color_swatch_url`, `main_image_url`, `return_policy` — one
+entry per color variant, returned as a list by `ProductSerializer.get_variants`
+(below). `get_color_swatch_url` is one of the three methods the "Catalog
+500" fix touched.
+
+**`ProductSerializer`**: the full catalog payload —
+`ProductViewSet`/`WishlistViewSet`'s `serializer_class`. Nests
+`ProductImageSerializer` (`images`, many), `ProductSizeInlineSerializer`
+(`sizes`, many), `CategorySerializer`, `CollectionSerializer` (many),
+`ProductGroupSerializer`, plus six `SerializerMethodField`s:
+`color_swatch_url` (also touched by the "Catalog 500" fix),
+`main_image_url`, `variants`, `collections_slugs`, `collections_names`,
+`is_in_wishlist`, `in_stock`.
+- **`get_variants`**: if `obj.group_id` is set, returns every
+  `available=True` product in the same group (ordered by `id`),
+  serialized via `ProductColorVariantSerializer(..., context=self.context)`
+  — **including `obj` itself**, since the queryset is `obj.group.products.filter(available=True)`
+  with no exclusion of the current product's own id. Without a group,
+  falls back to `Product.objects.filter(id=obj.id)` — a one-item
+  queryset containing just this product, so `variants` is **never
+  empty** for any product this serializer runs against, grouped or not.
+- **`get_is_in_wishlist`**: prefers an **annotation** (`obj._is_in_wishlist`,
+  set by `ProductViewSet.get_queryset`/`WishlistViewSet.get_queryset`
+  via `Exists(...)` — see `views.py` below) if present, falling back to
+  a **per-object query** (`ProductWishlist.objects.filter(user=user,
+  product=obj).exists()`) only if the annotation is absent. This
+  fallback path exists specifically for `get_variants`' nested
+  `ProductColorVariantSerializer` calls and for any other code path that
+  constructs `ProductSerializer` against an unannotated queryset — but
+  `ProductColorVariantSerializer` itself has **no** `is_in_wishlist`
+  field at all (it's not in that serializer's `Meta.fields`), so this
+  fallback is dead weight specifically for the variants path; it matters
+  for the top-level product list/detail responses, where
+  `get_queryset`'s annotation is what actually avoids an N+1 query per
+  product on a paginated list of 12+ items.
+- **`get_in_stock`**: same annotation-first, query-fallback pattern
+  (`obj._in_stock`), the Python-level twin of `ProductFilter.filter_in_stock`'s
+  SQL-level `Exists(...)` subquery — both independently compute "does
+  this product have any `ProductSize` with `quantity > 0`."
+
+**`CartSerializer`**: `id`, `user` (read-only), `created_at`, `items`
+(`CartItemSerializer`, many, read-only) — thin; all the real logic is in
+the item serializer, below.
+
+**`CartItemSerializer` — the file's most consequential serializer, and
+the one the task singled out:**
+- **Fields:** `product_size` (nested `ProductSizeSerializer`, read-only —
+  what a `GET`/response shows) vs. `product_size_id`
+  (`PrimaryKeyRelatedField`, `source="product_size"`, `write_only=True`,
+  `required=False` — what a `POST`/`PUT` body sends); `quantity`
+  (`min_value=1` via `extra_kwargs`, `required=False` so a `PUT` can omit
+  it); the seven measurement fields (`custom_bust` etc., plain
+  passthrough, client-writable); and — the field the task calls out
+  specifically — **`custom_length_cm` and `custom_length_surcharge`,
+  both explicitly declared `read_only=True`** on the serializer, overriding
+  whatever DRF's automatic `ModelSerializer` field generation would have
+  inferred from the model (which would otherwise make them ordinary
+  writable fields, since neither is `editable=False` on the model
+  itself). A client can send these two keys in a request body; DRF's
+  serializer will simply **discard** them during validation, since a
+  `read_only` field's incoming value is never placed into
+  `validated_data` at all.
+- **`_get_cart`/`_get_product_size`/`_get_requested_quantity`**: small
+  helpers that each fall back to `self.instance`'s existing value when
+  the corresponding key isn't present in `attrs` — this is what makes
+  the same `validate()` method correctly handle both a `create`
+  (`self.instance is None`, everything must come from `attrs`) and a
+  **partial** `update` (`self.instance` exists; a `PUT` with just
+  `{"quantity": 4}` still needs to validate against the *existing*
+  `product_size`, not a missing one). `_get_requested_quantity` also
+  does its own `int(...)` coercion with a `try/except (TypeError,
+  ValueError)` → a field-level `ValidationError`, independent of
+  whatever DRF's own `IntegerField` coercion would have done — this
+  method operates on the raw `attrs` dict inside `validate()`, not
+  through a declared `IntegerField`, since `quantity` here is defined
+  via `extra_kwargs` on the model field, not overridden as its own
+  explicit serializer field the way `custom_length_cm` is.
+- **`_get_other_cart_quantity`**: sums `quantity` across every other
+  `CartItem` in the same cart for the **same** `product_size`
+  (excluding `self.instance` on an update, so editing an existing line
+  doesn't count itself twice) — this is the method that only makes sense
+  given migration `0019` dropping `CartItem`'s `unique_together`
+  constraint (see the migrations section above): without that migration
+  history, at most one `CartItem` row could ever exist per
+  `(cart, product_size)` pair, and this summing loop would have at most
+  one row to sum regardless.
+- **`validate()`**: the full eligibility chain, in order — product must
+  be `available`; the size's `ProductSize.quantity` must be `> 0` at
+  all (a distinct check from the next one, giving a specific "out of
+  stock" message rather than folding it into the quantity-exceeded
+  message); `other_cart_quantity + quantity` (this line's requested
+  total, plus every *other* line already in the cart for the same size)
+  must not exceed `available_quantity` — the message pluralizes correctly
+  (`"1 item"` vs. `"N items"`); and, only if `custom_length_selected` is
+  truthy (falling back to the existing instance value on update), the
+  product must have `allows_custom_length=True` or the request is
+  rejected.
+- **`_apply_custom_length_snapshot(validated_data)`**: called from both
+  `create()` and `update()`, **after** `validate()` has already run (so
+  the `allows_custom_length` gate has already been enforced once). If
+  `custom_length_selected` (from `validated_data`, falling back to the
+  existing instance) is truthy: re-fetches `product.allows_custom_length`
+  and **raises again** if it's somehow `False` here (a second,
+  redundant check — see Watch out for), then sets
+  `validated_data["custom_length_cm"] = product.custom_length_cm` and
+  `validated_data["custom_length_surcharge"] = product.custom_length_surcharge`
+  — **copied directly from the `Product` row at the moment of save, not
+  from anything the client sent** (the client couldn't have sent them
+  anyway — both fields are `read_only`). If `custom_length_selected` is
+  falsy: explicitly resets all three related fields
+  (`custom_length_selected=False`, `custom_length_cm=None`,
+  `custom_length_surcharge=0`) — so **unchecking** custom length on an
+  existing line (via a `PUT`) correctly clears a previously-snapshotted
+  surcharge, rather than leaving a stale surcharge in place attached to
+  a line that no longer has custom length selected.
+
+**Cross-reference — `tresse_frontend/src/store/serverCartSlice.ts`:**
+that file's `postCartItem` helper deliberately never sends
+`custom_length_cm`/`custom_length_surcharge` in its request body, with
+an inline comment explaining exactly this read-only/server-snapshot
+behavior — the frontend guide's own entry for that file documents this
+in detail, including that it was briefly flagged as a potential
+data-loss bug (an internal audit finding, referred to there as "P0-03")
+before reading this exact serializer code showed it wasn't one: sending
+those two fields from the client would have been pure dead weight, since
+`validate`/`_apply_custom_length_snapshot` discard and recompute them
+server-side regardless of what arrives in the request body.
+
+**What it talks to:** `products/models.py` (all eleven models except
+`Review`/`EmailLog`). Used by `products/views.py`'s `CartAPIView`/
+`CartItemAPIView` (`CartItemSerializer`, `CartSerializer`) and
+`ProductViewSet`/`WishlistViewSet` (`ProductSerializer`). Frontend:
+`store/serverCartSlice.ts` (cart endpoints), `api/products.ts`/
+`view/ProductCatalog.tsx`/`view/ProductDetails.tsx`/`view/WishList.tsx`
+(product list/detail payloads).
+
+**Watch out for:**
+- **The `allows_custom_length` check happens twice, in two different
+  places, against the same `product_size.product`**: once in `validate()`
+  (raising `ValidationError` if `custom_length_selected` is truthy but
+  the product doesn't allow it), and again inside
+  `_apply_custom_length_snapshot` (raising the **exact same** error
+  message a second time). Since `_apply_custom_length_snapshot` only
+  ever runs from `create()`/`update()`, which DRF only calls **after**
+  `validate()` has already succeeded, the second check is currently
+  unreachable in the normal request flow — it would only matter if some
+  other code path called `_apply_custom_length_snapshot` directly
+  without going through `is_valid()` first (no such call site exists in
+  this codebase today), or if the product's `allows_custom_length`
+  somehow changed **between** `validate()` running and `create()`/`update()`
+  being called moments later in the same request — a narrow, unlikely-
+  but-not-impossible race if this serializer's usage pattern ever
+  changed (e.g. validation and save split across two different requests,
+  which isn't how `CartItemAPIView` uses it today).
+- **`quantity`'s validation lives partly in `extra_kwargs`
+  (`min_value=1`) and partly in `_get_requested_quantity`'s manual
+  `int(...)` coercion inside `validate()`** — two different mechanisms
+  enforcing overlapping rules (DRF's own field-level `min_value` would
+  already reject `0`/negative before `validate()` even runs, in the
+  normal case where `quantity` arrives as a JSON number) — the manual
+  check exists specifically for a **non-numeric** string value DRF's
+  own coercion might not cleanly reject the same way, and for the
+  fallback-to-instance-value case on a partial update where `quantity`
+  isn't in `attrs` at all and the raw model value (already an `int`) is
+  used directly.
+
+**Interview questions:**
+- *Q: Why are `custom_length_cm` and `custom_length_surcharge` declared
+  explicitly on the serializer with `read_only=True`, rather than just
+  leaving them out of `Meta.fields` entirely if the client should never
+  set them?* — They still need to appear in the **response** (a
+  `GET`/the object returned after `POST`/`PUT` needs to show the
+  customer what surcharge was actually applied) — a field genuinely
+  excluded from `Meta.fields` wouldn't be serialized in the output at
+  all; `read_only=True` is what gives "shown in responses, silently
+  ignored on input" in one declaration, which is exactly the contract
+  this field needs.
+- *Q: Walk through what happens if a customer adds a custom-length item
+  to their cart, and the product's `custom_length_surcharge` is changed
+  by an admin an hour later, before the customer checks out.* — The
+  existing `CartItem` row keeps whatever surcharge was snapshotted at
+  the moment it was added (or last updated) — nothing re-syncs a cart
+  line against a live product price after the fact. The customer would
+  see the old surcharge until they either remove and re-add the item, or
+  perform any update that goes back through `_apply_custom_length_snapshot`
+  with `custom_length_selected` still truthy (which re-reads the
+  **current** `product.custom_length_surcharge` at that moment) — a
+  quantity-only `PUT`, for instance, would still pass back through
+  `_apply_custom_length_snapshot` (called unconditionally from `update()`)
+  and would therefore **also** silently refresh the surcharge to
+  whatever it currently is, even though the customer only meant to
+  change quantity.
+- **Harder follow-up:** *Q: `_get_other_cart_quantity` excludes
+  `self.instance` "on an update" — but on a **create** (`self.instance
+  is None`), is there any risk of a request double-counting the very
+  line it's about to create?* — No — on create, the new `CartItem`
+  doesn't exist yet at the moment `_get_other_cart_quantity` runs (it
+  queries `CartItem.objects.filter(cart=cart, product_size=product_size)`
+  against rows that are already persisted), so every row the query finds
+  is genuinely a different, pre-existing line; there's nothing to
+  exclude because there's nothing to accidentally include. The exclusion
+  only matters for update, where the very row being validated **already
+  exists** in the table the query is scanning and would otherwise count
+  itself once in `other_cart_quantity` and then again via the
+  `+ quantity` term in `requested_cart_total = other_cart_quantity +
+  quantity`, silently halving the effective limit for any update to an
+  existing line (e.g. a size with 5 available and one existing line of
+  quantity 3 would, without the exclusion, compute
+  `other_cart_quantity=3` even when trying to update that same line to
+  `quantity=3` again — a no-op change — and reject it as `3 + 3 = 6 > 5`).
+
+### `products/admin.py`
+
+**What it is:** admin registrations for all eleven models except
+`ProductWishlist`/`Review`... **actually `Review` is registered**
+(`ReviewAdmin`) — only `ProductWishlist` has no admin registration at
+all (**unverified** whether that's deliberate, since wishlist entries
+are arguably not something staff need to browse directly, versus every
+other user-generated-content model in this app having one).
+
+**Notable pieces:** `ProductAdmin` uses `SortableAdminMixin`
+(drag-to-reorder in the changelist, backing `sort_order` — the field
+`ProductViewSet.reorder`, below, also writes to, via a completely
+separate code path: the admin's drag-reorder and the API's `PATCH
+.../reorder/` action both mutate the same field independently, with no
+shared code between them) and a custom `ProductAdminForm` that renders
+`collections` as checkboxes (`CheckboxSelectMultiple`) instead of the
+default multi-select widget. `ProductImageInline`
+(`SortableInlineAdminMixin`) has its own `preview` method — a **fourth**
+independent "guard `.url`" implementation (see `models.py`'s Watch out
+for above). `ProductAdmin.color_preview` renders either the swatch image
+(if set, itself `try/except`-guarded) or a plain CSS color swatch from
+`color_hex` as a fallback, or an em-dash if neither is set.
+`EmailLogAdmin` is **fully read-only** — `has_add_permission`/
+`has_change_permission`/`has_delete_permission` all hard-coded `False`,
+so this table is genuinely append-only from the admin's perspective
+(rows can still be deleted directly via the database/shell, just not
+through this UI).
+
+**Interview question:** *Q: `ProductAdmin`'s drag-to-reorder (via
+`SortableAdminMixin`) and `ProductViewSet.reorder`'s `PATCH` action both
+write to `Product.sort_order`. Is there any coordination between the
+two?* — None found in this pass — they're two entirely separate code
+paths (one admin-UI-triggered via `django-adminsortable2`'s own AJAX
+endpoint, one a custom DRF `@action`) that happen to converge on the
+same field; whichever one runs last simply overwrites whatever ordering
+the other one set, with no locking, versioning, or conflict detection
+between them — acceptable in practice only because both are
+staff-only, low-frequency operations, not something two people are
+likely to do to the same product list simultaneously.
+
+### `products/urls.py`
+
+```
+cart/                        -> CartAPIView                          (name: user-cart)
+cart/items/                  -> CartItemAPIView (POST)                (name: cart-items)
+cart/items/<int:item_id>/    -> CartItemAPIView (PUT, DELETE)         (name: cart-item)
+wishlist/                    -> WishlistViewSet (router)              (basename: wishlist)
+wishlist/count/               -> WishlistViewSet.count                (name: wishlist-count)
+<router root>                -> ProductViewSet (router)               (basename: product)
+  /<pk>/wishlist/             -> ProductViewSet.wishlist               (name: product-wishlist)
+  /<pk>/subscribe_back_in_stock/ -> ProductViewSet.subscribe_back_in_stock (name: product-subscribe-back-in-stock)
+  /reorder/                   -> ProductViewSet.reorder                (name: product-reorder)
+```
+
+Two `DefaultRouter`-registered viewsets share this file: `wishlist`
+mounted explicitly at `r"wishlist"`, and `ProductViewSet` mounted at the
+router **root** (`r""`) — meaning `ProductViewSet`'s own list/detail
+routes (`GET /products/`, `GET /products/<pk>/`) and every custom
+`@action` on it live directly under `/products/`, while `wishlist/`'s
+routes are namespaced under `/products/wishlist/`. Included at
+`api/products/` by `tresse/urls.py`.
+
+### `products/views.py`
+
+**What it is:** `CartAPIView`, `CartItemAPIView`, `ProductViewSet`,
+`WishlistViewSet`.
+
+**`CartAPIView`** (`IsAuthenticated`, `GET` only): `get_or_create`s a
+`Cart`, then **re-fetches it** by `pk` with a full
+`select_related`/`prefetch_related` chain (`user`,
+`items__product_size__size`,
+`items__product_size__product__images`,
+`items__product_size__product__category`,
+`items__product_size__product__collections`) before serializing — the
+`get_or_create` call itself doesn't carry those relations, so this
+two-step "create-or-get, then re-fetch with the real query plan" pattern
+avoids either an N+1 (serializing the unoptimized `get_or_create` result
+directly) or fetching relations for a cart that might not have needed
+creating in the first place.
+
+**`CartItemAPIView`** — three methods, no `Serializer`-class-level
+`queryset`/`serializer_class` (a plain `APIView`, not a `ModelViewSet`),
+each wrapped in its own `transaction.atomic()`:
+- **`post`**: validates `product_size_id` is present and an integer
+  before opening the transaction at all (a `400` for a missing/malformed
+  id needs no lock). Inside the transaction: `get_or_create`s the cart,
+  then **re-fetches it with `select_for_update()`** (a second query,
+  deliberately — `get_or_create` itself can't be combined with
+  `select_for_update` in one call), locks the target `ProductSize` row
+  the same way, builds a mutable copy of the request payload with
+  `product_size_id` forced to the **locked** row's own id (defensive —
+  ensures the serializer validates against the exact row this request
+  already holds a lock on, not a stale unlocked read), defaults
+  `quantity` to `1` if blank, then validates+saves via
+  `CartItemSerializer(data=payload, context={"request":..., "cart": cart})`.
+  A `serializers.ValidationError` inside the `try` is explicitly
+  **re-raised** (not swallowed) — so DRF's own exception handler still
+  turns it into the normal `400` response; the `try/except` here exists
+  to make the *lock scope* explicit (everything that needs the row locks
+  happens inside it), not to intercept validation errors. After the
+  transaction closes, re-fetches the created item with its own
+  `select_related`/`prefetch_related` chain for the response — the same
+  "write inside a lock, re-fetch with a richer query plan for the
+  response" pattern `CartAPIView` uses.
+- **`put`**: same locking shape — locks the user's `Cart`, then the
+  target `CartItem` (`404` if not found or not owned by this user — the
+  ownership check is baked directly into the `filter(id=item_id,
+  cart=cart)`, not a separate permission check), then the item's own
+  `ProductSize`, force-sets `product_size_id` back onto the payload
+  (**so a client cannot change which product/size a cart line points to
+  via this endpoint**, even if the request body included a different
+  `product_size_id` — the line's identity is fixed once created; only
+  quantity/measurements can change through `PUT`), validates+saves via
+  `CartItemSerializer(item, data=payload, partial=True, ...)`.
+- **`delete`**: the **only** one of the three methods that does **not**
+  use `select_for_update()`/an explicit transaction at all — a plain
+  `get_object_or_404` for the cart, then the item (scoped to that cart,
+  same ownership-via-filter pattern), then `.delete()`. No lock is taken
+  before the delete.
+
+**`ProductViewSet`** (`ReadOnlyModelViewSet`, `AllowAny`): `list`/
+`retrieve` only (no create/update/delete through the viewset's own
+routes) plus four custom pieces.
+- **`get_queryset`**: the base queryset with `select_related`
+  (`category`, `group`) and a `prefetch_related` chain that includes
+  **`group__products`/`group__products__images`** — prefetching every
+  *other* product in the same color group, and *their* images too, for
+  **every** product in the result set — this is what lets
+  `get_variants` (`serializers.py`, above) avoid a fresh query per
+  product when building the color-variant list, at the cost of
+  prefetching data that's wasted for the (likely common) case of a
+  product with no group at all. Annotates `_in_stock` via `Exists(...)`
+  unconditionally (every request gets this annotation, whether or not
+  the `in_stock` filter param is even used — it's what
+  `ProductSerializer.get_in_stock` reads to avoid its own per-object
+  fallback query) and `_is_in_wishlist` **only if the requester is
+  authenticated** (an anonymous request never gets this annotation, so
+  every product's `get_is_in_wishlist` falls back to its `False`-for-
+  anonymous branch, which never queries `ProductWishlist` at all for
+  that case). Also applies the manual `category`/`collection` filtering
+  documented in `filters.py`'s Watch out for above, **in addition to**
+  whatever `ProductFilter` (the `filterset_class`) does — ends with
+  `.distinct()` (needed because the `collections`
+  `ManyToManyField`/`group__products` joins can otherwise multiply rows).
+- **`get_serializer_context`**: adds `request` — without this override,
+  a `ReadOnlyModelViewSet`'s default context already includes `request`
+  in modern DRF, making this override **redundant** in current DRF
+  versions specifically for that key (**unverified** which DRF version
+  this project pins and whether the override predates a DRF version
+  where it was actually necessary); harmless either way.
+- **`wishlist`** (`@action`, `POST`/`DELETE`, `IsAuthenticated`):
+  `get_or_create`/`.delete()` on `ProductWishlist`, returning just
+  `{"is_in_wishlist": true/false}` — no updated product payload, no
+  wishlist count. `store/wishListSlice.ts`'s `inc`/`dec` (per the
+  frontend guide) are the optimistic-UI mechanism that exists precisely
+  because this endpoint's own response doesn't include a fresh count the
+  caller could otherwise read directly.
+- **`subscribe_back_in_stock`** (`@action`, `POST`, `AllowAny`,
+  stock-subscribe throttles): authenticated users' `request.user.email`
+  is used automatically (ignoring any `email` the request body might
+  contain); anonymous requests read `email` from the body and validate
+  it with `django.core.validators.validate_email`. `get_or_create`s the
+  `StockSubscription` — and, **separately**, if the request is
+  authenticated but the found/created subscription has no `user` set yet
+  (e.g. a guest subscribed with this email before creating an account,
+  and is now subscribing again while logged in with the same address),
+  **backfills** `subscription.user` onto the existing row rather than
+  creating a second one — `unique_together = ("product", "email")` is
+  what makes this safe: the `get_or_create` call is guaranteed to find
+  the existing row by email rather than risk a duplicate.
+- **`reorder`** (`@action`, `PATCH`, `IsAdminUser`): expects
+  `{"items": [{"id": ...}, ...]}`; the **array's own order** is what
+  becomes the new `sort_order` (`enumerate(items)`, index → `sort_order`)
+  — a malformed/missing `id` in any one array entry is silently skipped
+  (`continue`), not rejected outright, so a partially-malformed request
+  still applies whatever valid entries it did contain rather than
+  failing the whole batch.
+
+**`WishlistViewSet`** (`ReadOnlyModelViewSet`, `IsAuthenticated`): `list`
+only really matters here (`retrieve` is technically available too, via
+the same `ReadOnlyModelViewSet` base, but nothing in the frontend guide's
+own reading of `view/WishList.tsx` suggests it's used for single-item
+fetches). `get_queryset` filters `Product` to just the ids in the
+user's `ProductWishlist`, with the **same** `select_related`/
+`prefetch_related` chain `ProductViewSet.get_queryset` uses, plus
+`_is_in_wishlist` **hardcoded to `Value(True, ...)`** rather than an
+`Exists(...)` subquery — a reasonable shortcut, since every product this
+queryset returns is, by construction, already in the wishlist; no query
+is needed to confirm what's already guaranteed by the `filter(id__in=
+wish_ids)` clause. A separate `@action`, `count` (`GET
+/products/wishlist/count/`), returns just `{"count": n}` — the endpoint
+`store/wishListSlice.ts`'s `fetchWishlistCount` thunk calls.
+
+**What it talks to:** every serializer in `products/serializers.py`
+except `ProductSizeInlineSerializer`/`ProductGroupSerializer`/
+`ProductColorVariantSerializer` (used only indirectly, nested inside
+`ProductSerializer`), `products/filters.py` (`ProductFilter`),
+`products/throttles.py`. Frontend: `api/products.ts` (`fetchProducts`),
+`store/serverCartSlice.ts` (all four cart endpoints),
+`store/wishListSlice.ts` (`count`), `view/ProductCatalog.tsx`/
+`view/ProductDetails.tsx` (wishlist toggle, back-in-stock subscribe),
+`view/WishList.tsx`.
+
+**Watch out for:**
+- **`CartItemAPIView.delete` is the one write path in this file with no
+  row lock at all** — every other mutating method
+  (`post`/`put`, and, outside this class, `ProductViewSet.reorder`) opens
+  a `transaction.atomic()` and takes `select_for_update()` locks before
+  writing; `delete` goes straight to `.delete()` with no transaction or
+  lock. In practice, deleting a row concurrently with something else
+  reading/writing that same row is a narrower risk than the
+  quantity-vs-stock races the other methods are guarding against, but
+  it's a real asymmetry in this file's own locking discipline.
+- **`get_queryset`'s manual category/collection filtering plus
+  `ProductFilter`'s own handling of the same two params** is the
+  `?category=women` bug documented in `filters.py`'s own Watch out for
+  above — restated here because this is the file where the redundant,
+  alias-blind manual filter actually lives.
+- **`get_serializer_context`'s `request` injection is duplicated between
+  `ProductViewSet` and `WishlistViewSet`** — identical three-line
+  override in both classes, not factored into a shared base/mixin, even
+  though both viewsets otherwise share most of their `get_queryset`
+  logic too (the `select_related`/`prefetch_related` chain is copy-pasted
+  between the two, not extracted into a helper function either).
+
+**Interview questions:**
+- *Q: Why does `CartItemAPIView.post` force `product_size_id` onto the
+  payload to the **locked** row's own id, rather than trusting whatever
+  `product_size_id` the client actually sent?* — By the time that line
+  runs, the code has already resolved and locked a specific `ProductSize`
+  row (`product_size = ProductSize.objects.select_for_update()...first()`)
+  — re-writing the payload to that row's confirmed id (rather than the
+  client's raw, unlocked input) guarantees the serializer that validates
+  stock/eligibility next is checking the **exact same row** the
+  transaction is holding a lock on, closing any gap between "which row
+  did we lock" and "which row does the serializer think it's validating
+  against."
+- *Q: `subscribe_back_in_stock` is reachable by both authenticated and
+  anonymous requests, on the same `AllowAny` action. What stops an
+  authenticated user's request from ever hitting the anonymous
+  email-from-body branch?* — The `if request.user.is_authenticated: ...
+  else: ...` branch is checked first and is exhaustive — an authenticated
+  request always takes the `request.user.email` branch and never reads
+  `request.data.get("email")` at all, regardless of what the body
+  contains; there's no way for an authenticated caller's request body to
+  override whose email gets used.
+- **Harder follow-up:** *Q: `ProductViewSet.get_queryset` annotates
+  `_is_in_wishlist` only for an authenticated request. Trace exactly what
+  `ProductSerializer.get_is_in_wishlist` does for an anonymous request to
+  `GET /products/`, and confirm there's no query-per-product cost hidden
+  in that path.* — For an anonymous request, `_is_in_wishlist` is never
+  set on any product instance, so `getattr(obj, "_is_in_wishlist", None)`
+  returns `None` for every product, which `get_is_in_wishlist` treats as
+  "no annotation" and falls into its fallback branch — but that fallback
+  itself checks `user and user.is_authenticated` **first**, and for an
+  anonymous request `request.user` is Django's `AnonymousUser`, whose
+  `is_authenticated` is `False` by design — so the fallback returns
+  `False` immediately without ever reaching the
+  `ProductWishlist.objects.filter(...)` query. No query-per-product cost
+  exists for the anonymous path; the annotation exists purely to avoid
+  that cost for the **authenticated** path, where the fallback would
+  otherwise genuinely run once per product per page.
+
+### `products/tests.py`
+
+535 lines, ten test classes, no shared base test case — each class
+builds its own fixtures via a local `_make_product(**kwargs)` helper
+(defaults: `name="Sweater"`, `price=Decimal("50.00")`) and the shared
+`testing_helpers.make_user` (imported as `from testing_helpers import
+make_user` — note the module's own internal header comment says `#
+tresse_backend/test_utils.py`, a stale filename that no longer matches
+where this file actually lives, `testing_helpers.py` at the repo root;
+harmless, but a real inconsistency if anyone goes looking for
+`test_utils.py` based on that comment alone).
+
+**What's mocked, by area:**
+- `products.signals.send_back_in_stock_email` is mocked in every
+  `StockSignalTestCase` test — none of them let a real email attempt
+  happen; each also wraps the triggering `.save()` in
+  `self.captureOnCommitCallbacks(execute=True)` (see `signals.py`'s own
+  "harder follow-up" interview question above for exactly why that
+  wrapper is load-bearing, not optional, for these specific assertions).
+- `ImageUrlFailureTestCase` (added for the "Catalog 500 on unguarded
+  image URLs" fix, `docs/fixes-2026-09.md`) patches
+  `django.db.models.fields.files.FieldFile.url` itself — a `PropertyMock`
+  raising `ValueError` — rather than mocking any of this app's own
+  code, so the test exercises the real `ProductImageSerializer`/
+  `ProductSerializer`/`ProductColorVariantSerializer` methods against a
+  genuinely-raising `.url` property, the same failure mode a real broken
+  storage backend would produce.
+- No test in this file mocks `django_filters`/DRF's filter backends —
+  `ProductFilterTestCase` calls `ProductFilter(...).qs` directly against
+  a real, unmocked queryset, and `ProductListAPITestCase`/
+  `ProductReorderTestCase` go through the real `APIClient` end to end.
+
+**What's asserted, by area:**
+- **`CartItemAddTestCase`/`CartItemUpdateDeleteTestCase`**: the full
+  `CartItemSerializer.validate()` chain from the outside — stock limits
+  (including the aggregate-across-lines case,
+  `test_adding_same_size_twice_aggregates_against_stock`, whose own
+  inline comment calls it out as the "ключевой" (key) test for exactly
+  the migration-`0019` consequence documented in `serializers.py`'s
+  section above), out-of-stock/unavailable-product rejection, ownership
+  (`404`, not `403`, for another user's cart item — consistent with
+  `CartItemAPIView`'s own `filter(..., cart=cart)`-based lookup
+  returning nothing rather than a distinguishable "exists but not
+  yours" signal), and the custom-length snapshot actually landing on the
+  created row with the product's current `custom_length_cm`/
+  `custom_length_surcharge` values.
+- **`WishlistActionTestCase`**: add/remove/idempotent-add (posting twice
+  creates exactly one row), the count endpoint, and the
+  `401` for an unauthenticated wishlist toggle.
+- **`StockSubscriptionTestCase`**: anonymous-with-email,
+  authenticated-uses-own-email, both invalid/missing email rejected,
+  duplicate subscription staying a single row.
+- **`ProductReorderTestCase`**: `403` for a non-admin, a real
+  `sort_order` swap for an admin, and a non-list `items` payload
+  rejected with `400`.
+- **`ProductFilterTestCase`**: the category alias map, price range, and
+  in-stock filtering — directly against `ProductFilter(...).qs`, not
+  through the full view stack, so this specific test class would **not**
+  catch the `get_queryset` manual-filter interaction documented in
+  `filters.py`'s Watch out for above (that bug only manifests when both
+  filters run together, which only happens through the real view).
+- **`ImageUrlFailureTestCase`**: the direct regression coverage for the
+  "Catalog 500" fix — each of the three touched serializer methods
+  returns `None` for its one field while the rest of the payload,
+  including a nested nested list (`ProductSerializer`'s own `images`),
+  stays intact.
+- **`StockSignalTestCase`**: the full restock-detection matrix from
+  `signals.py`'s `notify_when_back_in_stock` — zero-to-positive sends,
+  zero-to-zero doesn't, a decrease doesn't, positive-to-positive
+  doesn't, an already-notified subscription isn't notified twice — this
+  is the direct regression coverage for both [[P0-01]] (the signal never
+  firing at all) and [[P0-02]] (the signal firing too eagerly), both in
+  `docs/fixes-2026-09.md`.
+
+**Interview question:** *Q: `test_adding_same_size_twice_aggregates_against_stock`
+posts the same `product_size_id` twice with `quantity: 3` each, against
+a `ProductSize` with `quantity=5`, and expects the **second** request to
+be rejected. Why does this test only make sense given migration `0019`'s
+history?* — Because it's asserting that two separate `CartItem` rows for
+the same `(cart, product_size)` are even possible to create in the first
+place (the first `POST` succeeds and creates one), and that
+`_get_other_cart_quantity`'s summing logic then correctly catches the
+second request as pushing the combined total over the available stock —
+if `CartItem` still had the `unique_together` constraint migration
+`0018` originally added (before `0019` dropped it), the **first**
+successful `POST` would have already created the only row the DB allows
+for that pair, and a second `POST` for the same size would have to be
+handled as an update-in-disguise (or rejected by the DB) rather than
+ever reaching the "two rows, sum their quantities" code path this test
+is actually exercising.
+
+---
+
 ## How the pieces fit
 
 Four walkthroughs, each naming the files involved in order, across both
