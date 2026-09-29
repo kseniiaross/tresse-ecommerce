@@ -1,11 +1,3 @@
-@font-face {
-	font-family: "tresse_font";
-	src: url("../src/assets/fonts/tresse_font.woff2") format("woff2");
-	font-weight: 400;
-	font-style: normal;
-	font-display: swap;
-}
-
 :root {
 	/* =========================================================================
      COLORS
@@ -92,7 +84,7 @@
 	--track-sm: 0.06em;
 	--kicker-size: 12px;
 	--kicker-spacing: 0.14em;
-	--font-luxury: "tresse_font", "Times New Roman", serif;
+	--font-luxury: "Cormorant Garamond", "Times New Roman", serif;
 
 	/* =========================================================================
      RADIUS

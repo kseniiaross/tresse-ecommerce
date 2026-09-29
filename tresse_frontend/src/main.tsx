@@ -6,6 +6,8 @@ import { setOnUnauthorized } from "./api/axiosInstance";
 import { store } from "./store";
 import { setCount } from "./store/wishListSlice";
 import "./index.css";
+import "@fontsource/cormorant-garamond/400.css";
+import "@fontsource/cormorant-garamond/600.css";
 
 setOnUnauthorized(() => {
 	store.dispatch(setCount(0));
