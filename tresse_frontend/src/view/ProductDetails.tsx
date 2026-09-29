@@ -129,7 +129,7 @@ export default function ProductDetails() {
 	const [customLengthSelected, setCustomLengthSelected] = useState(false);
 
 	// Both accordions start closed so the Add to cart button stays above the
-	// fold on a laptop screen regardless of how long the description is.
+	// fold on a laptop screen regardless of how long the product copy is.
 	const [isDetailsOpen, setIsDetailsOpen] = useState(false);
 
 	const [isCareOpen, setIsCareOpen] = useState(false);
@@ -689,7 +689,6 @@ export default function ProductDetails() {
 											className="product-detail__accordion-toggle"
 											onClick={() => setIsDetailsOpen((previous) => !previous)}
 											aria-expanded={isDetailsOpen}
-											aria-controls="product-detail-details"
 										>
 											<span>Details</span>
 
@@ -702,20 +701,18 @@ export default function ProductDetails() {
 										</button>
 									</h2>
 
-									<div
-										id="product-detail-details"
-										className="product-detail__accordion-content"
-										hidden={!isDetailsOpen}
-									>
-										{descriptionRest.map((paragraph, index) => (
-											<p
-												key={`details-${index}`}
-												className="product-detail__accordion-line"
-											>
-												{paragraph}
-											</p>
-										))}
-									</div>
+									{isDetailsOpen ? (
+										<div className="product-detail__accordion-content">
+											{descriptionRest.map((paragraph, index) => (
+												<p
+													key={`details-${index}`}
+													className="product-detail__accordion-line"
+												>
+													{paragraph}
+												</p>
+											))}
+										</div>
+									) : null}
 								</section>
 							) : null}
 
@@ -727,7 +724,6 @@ export default function ProductDetails() {
 											className="product-detail__accordion-toggle"
 											onClick={() => setIsCareOpen((previous) => !previous)}
 											aria-expanded={isCareOpen}
-											aria-controls="product-detail-care"
 										>
 											<span>Care Instructions</span>
 
@@ -740,20 +736,18 @@ export default function ProductDetails() {
 										</button>
 									</h2>
 
-									<div
-										id="product-detail-care"
-										className="product-detail__accordion-content"
-										hidden={!isCareOpen}
-									>
-										{careLines.map((line, index) => (
-											<p
-												key={`care-${index}`}
-												className="product-detail__accordion-line"
-											>
-												{line}
-											</p>
-										))}
-									</div>
+									{isCareOpen ? (
+										<div className="product-detail__accordion-content">
+											{careLines.map((line, index) => (
+												<p
+													key={`care-${index}`}
+													className="product-detail__accordion-line"
+												>
+													{line}
+												</p>
+											))}
+										</div>
+									) : null}
 								</section>
 							) : null}
 						</div>
