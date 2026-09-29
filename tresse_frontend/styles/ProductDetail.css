@@ -192,6 +192,7 @@
 
 .product-detail__desc {
 	margin-top: 20px;
+	max-width: 420px;
 }
 
 .product-detail__section-title {
@@ -220,17 +221,31 @@
 }
 
 /* =========================
-   CARE
+   ACCORDIONS  (Details / Care)
+   =========================
+   Both start closed, which keeps the Add to cart button above the fold on a
+   laptop screen no matter how long the product copy is. The panels use the
+   `hidden` attribute rather than conditional rendering, so the button's
+   aria-controls always points at an element that exists.
    ========================= */
 
-.product-detail__care {
+.product-detail__accordions {
 	max-width: 420px;
 	margin-top: 20px;
 	border-top: 1px solid rgb(0 0 0 / 14%);
+}
+
+.product-detail__accordion {
 	border-bottom: 1px solid rgb(0 0 0 / 14%);
 }
 
-.product-detail__care-toggle {
+.product-detail__accordion-heading {
+	margin: 0;
+	font: inherit;
+	font-weight: inherit;
+}
+
+.product-detail__accordion-toggle {
 	width: 100%;
 	padding: 14px 0;
 	display: flex;
@@ -245,21 +260,39 @@
 	letter-spacing: 0.18em;
 	text-transform: uppercase;
 	font-weight: 600;
+	text-align: left;
 	cursor: pointer;
 }
 
-.product-detail__care-content {
-	padding: 0 0 14px;
+.product-detail__accordion-toggle:focus-visible {
+	outline: 2px solid rgb(17 17 17 / 35%);
+	outline-offset: 2px;
 }
 
-.product-detail__care-line {
-	margin: 0 0 10px;
+.product-detail__accordion-icon {
+	flex: 0 0 auto;
+	font-size: 14px;
+	line-height: 1;
+	opacity: 0.6;
+}
+
+.product-detail__accordion-content {
+	padding: 0 0 16px;
+}
+
+.product-detail__accordion-content[hidden] {
+	display: none;
+}
+
+.product-detail__accordion-line {
+	margin: 0 0 12px;
 	font-size: 13px;
-	line-height: 1.65;
+	line-height: 1.7;
 	opacity: 0.88;
+	white-space: pre-wrap;
 }
 
-.product-detail__care-line:last-child {
+.product-detail__accordion-line:last-child {
 	margin-bottom: 0;
 }
 
@@ -668,7 +701,8 @@
 		grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
 	}
 
-	.product-detail__care,
+	.product-detail__desc,
+	.product-detail__accordions,
 	.product-detail__btn {
 		max-width: 100%;
 	}

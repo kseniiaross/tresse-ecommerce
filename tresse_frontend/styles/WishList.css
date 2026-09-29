@@ -20,7 +20,7 @@
 .wishlist__title {
 	margin: 0 0 18px;
 	text-align: center;
-	font-family: inherit;
+	font-family: var(--font-luxury);
 	font-size: 30px;
 	font-weight: 500;
 	line-height: 1.1;

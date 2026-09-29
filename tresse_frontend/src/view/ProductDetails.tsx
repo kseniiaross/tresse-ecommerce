@@ -128,6 +128,10 @@ export default function ProductDetails() {
 
 	const [customLengthSelected, setCustomLengthSelected] = useState(false);
 
+	// Both accordions start closed so the Add to cart button stays above the
+	// fold on a laptop screen regardless of how long the description is.
+	const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+
 	const [isCareOpen, setIsCareOpen] = useState(false);
 
 	const [isImageModalOpen, setIsImageModalOpen] = useState(false);
@@ -195,6 +199,15 @@ export default function ProductDetails() {
 		return splitParagraphs(product.description);
 	}, [product]);
 
+	// The opening paragraph is the selling copy and stays visible; everything
+	// after it (size and fit, composition, production time) goes behind the
+	// Details toggle.
+	const descriptionLead = descriptionParagraphs[0] ?? null;
+
+	const descriptionRest = useMemo(() => {
+		return descriptionParagraphs.slice(1);
+	}, [descriptionParagraphs]);
+
 	const careLines = useMemo(() => {
 		if (!product?.care_instructions) {
 			return [];
@@ -202,6 +215,8 @@ export default function ProductDetails() {
 
 		return splitCareLines(product.care_instructions);
 	}, [product]);
+
+	const hasAccordions = descriptionRest.length > 0 || careLines.length > 0;
 
 	const imagesForGallery = useMemo<string[]>(() => {
 		const main = toHttps(product?.main_image_url ?? undefined);
@@ -248,6 +263,7 @@ export default function ProductDetails() {
 				setCustomLengthSelected(false);
 
 				setActiveImageIndex(0);
+				setIsDetailsOpen(false);
 				setIsCareOpen(false);
 				setIsImageModalOpen(false);
 				setIsCustomModalOpen(false);
@@ -651,47 +667,94 @@ export default function ProductDetails() {
 						</div>
 					) : null}
 
-					{descriptionParagraphs.length > 0 ? (
+					{descriptionLead ? (
 						<div className="product-detail__desc">
 							<h2 className="product-detail__section-title">Description</h2>
 
 							<div className="product-detail__desc-text">
-								{descriptionParagraphs.map((paragraph, index) => (
-									<p
-										key={`${paragraph}-${index}`}
-										className="product-detail__desc-paragraph"
-									>
-										{paragraph}
-									</p>
-								))}
+								<p className="product-detail__desc-paragraph">
+									{descriptionLead}
+								</p>
 							</div>
 						</div>
 					) : null}
 
-					{careLines.length > 0 ? (
-						<div className="product-detail__care">
-							<button
-								type="button"
-								className="product-detail__care-toggle"
-								onClick={() => setIsCareOpen((previous) => !previous)}
-								aria-expanded={isCareOpen}
-							>
-								<span>Care Instructions</span>
-
-								<span>{isCareOpen ? "−" : "+"}</span>
-							</button>
-
-							{isCareOpen ? (
-								<div className="product-detail__care-content">
-									{careLines.map((line, index) => (
-										<p
-											key={`care-${index}`}
-											className="product-detail__care-line"
+					{hasAccordions ? (
+						<div className="product-detail__accordions">
+							{descriptionRest.length > 0 ? (
+								<section className="product-detail__accordion">
+									<h2 className="product-detail__accordion-heading">
+										<button
+											type="button"
+											className="product-detail__accordion-toggle"
+											onClick={() => setIsDetailsOpen((previous) => !previous)}
+											aria-expanded={isDetailsOpen}
+											aria-controls="product-detail-details"
 										>
-											{line}
-										</p>
-									))}
-								</div>
+											<span>Details</span>
+
+											<span
+												className="product-detail__accordion-icon"
+												aria-hidden="true"
+											>
+												{isDetailsOpen ? "−" : "+"}
+											</span>
+										</button>
+									</h2>
+
+									<div
+										id="product-detail-details"
+										className="product-detail__accordion-content"
+										hidden={!isDetailsOpen}
+									>
+										{descriptionRest.map((paragraph, index) => (
+											<p
+												key={`details-${index}`}
+												className="product-detail__accordion-line"
+											>
+												{paragraph}
+											</p>
+										))}
+									</div>
+								</section>
+							) : null}
+
+							{careLines.length > 0 ? (
+								<section className="product-detail__accordion">
+									<h2 className="product-detail__accordion-heading">
+										<button
+											type="button"
+											className="product-detail__accordion-toggle"
+											onClick={() => setIsCareOpen((previous) => !previous)}
+											aria-expanded={isCareOpen}
+											aria-controls="product-detail-care"
+										>
+											<span>Care Instructions</span>
+
+											<span
+												className="product-detail__accordion-icon"
+												aria-hidden="true"
+											>
+												{isCareOpen ? "−" : "+"}
+											</span>
+										</button>
+									</h2>
+
+									<div
+										id="product-detail-care"
+										className="product-detail__accordion-content"
+										hidden={!isCareOpen}
+									>
+										{careLines.map((line, index) => (
+											<p
+												key={`care-${index}`}
+												className="product-detail__accordion-line"
+											>
+												{line}
+											</p>
+										))}
+									</div>
+								</section>
 							) : null}
 						</div>
 					) : null}
