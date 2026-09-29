@@ -5,12 +5,14 @@ config files, written for interview prep. Every claim below is checked
 against the current code (not the audit's predictions, not a docs entry) —
 where a file calls the backend, the matching Django view/serializer in
 `tresse_backend` is cited by name. Anything that couldn't be confirmed
-from the code itself is marked **unverified**. Two backend sections
-(newsletter, email templates) are covered in the same depth as the
-frontend, since the frontend sections that call into them deserve the
-other half of the story spelled out rather than left as a "Backend:"
-name-drop — see Backend — newsletter and Backend — email templates
-below, and the four full-stack walkthroughs in How the pieces fit.
+from the code itself is marked **unverified**. Five backend sections
+(newsletter, email templates, accounts, products, orders) are covered in
+the same depth as the frontend, since the frontend sections that call
+into them deserve the other half of the story spelled out rather than
+left as a "Backend:" name-drop — see Backend — newsletter, Backend —
+email templates, Backend — accounts, Backend — products, and Backend —
+orders below, and the four full-stack walkthroughs in How the pieces
+fit.
 
 Stack reminder: React 19 + Vite 7, Redux Toolkit, React Router v6, Axios,
 Vitest + Testing Library, Playwright, Biome for lint/format on the
@@ -7079,13 +7081,1164 @@ is actually exercising.
 
 ---
 
+## Backend — orders
+
+This is where the money actually moves: every file under
+`tresse_backend/orders/`. Unlike `accounts`/`products`, there is no
+customer-facing order-*creation* endpoint at all — the only code path
+that ever inserts an `Order` row is the Stripe webhook in
+`views_stripe.py`, and every other file in this section exists to
+support, display, or unwind what that one webhook handler created. The
+webhook and the three-phase refund pattern it shares with
+`views.py`/`admin.py` get the deepest treatment below; the sections on
+`models.py`, `admin.py`, `emails.py` and the serializers are shorter but
+each still carries at least one verified, non-obvious finding.
+
+### `orders/models.py`
+
+**What it is:** `Order` and `OrderItem` — the two models everything else
+in this app reads or writes. No other model in `orders/` exists.
+
+**`_gen_public_id(prefix="TR")`**: builds the customer-facing order
+number — `TR-YYYYMMDD-XXXXXX`, where the date is `timezone.localdate()`
+(local, not UTC) and the six-character suffix is drawn from
+`secrets.choice` over a 32-character alphabet that deliberately excludes
+visually ambiguous characters (no `0`/`O`, no `1`/`I`, no `L`) — a
+support agent reading the code out loud over the phone can't confuse a
+digit for a letter. `secrets.choice`, not `random.choice`,
+is used specifically because this is a customer-facing identifier
+staff search by (`OrderAdmin.search_fields` includes `public_id`), not a
+security token — the module doesn't need cryptographic unpredictability
+here so much as it needs to not import `random` and invite a reviewer to
+ask why a public identifier isn't using the CSPRNG the rest of the
+codebase's tokens do.
+
+**`Order.save()`** does three things before delegating to the real
+`save()`, all guarded so they only ever *fill in* a value, never
+overwrite one already set:
+- `email` defaults to `self.user.email` if the order has a `user_id` but
+  no `email` of its own yet — but only on **first** save with `email`
+  unset; a `User.email` change afterward never retroactively touches an
+  already-saved `Order.email`, which is intentional (see `models.py`'s
+  entry in Questions by topic's "Data privacy and consent" below — an
+  order is a snapshot of what was true at purchase time).
+- `subtotal_amount` defaults to `total_amount` if a `total_amount` was
+  passed but `subtotal_amount` wasn't — in practice this only fires for
+  an `Order` created by hand (a test, an admin "Add order" form), never
+  for the webhook's own `Order.objects.create()` call, which always
+  passes both fields explicitly from the Stripe session's own
+  `amount_total`/`amount_subtotal`.
+- **`public_id` generation is a check-then-act loop**: `while True:
+  candidate = _gen_public_id(); if not
+  Order.objects.filter(public_id=candidate).exists(): break` — this
+  `exists()` check is itself racy (two concurrent `Order.save()` calls
+  could both pass it for the same candidate before either has inserted),
+  but the field's own `unique=True` constraint is the actual backstop: a
+  genuine collision wouldn't silently duplicate a public id, it would
+  raise `IntegrityError` on the losing `save()` — a race converted into
+  a visible failure rather than a silent one. At six characters from a
+  32-symbol alphabet (~1 billion combinations) and this store's order
+  volume, a real collision inside the same save-loop window is
+  vanishingly unlikely; the constraint exists as a correctness backstop,
+  not because collisions are expected.
+
+**`OrderItem`**: one row per cart line at the moment of purchase, not a
+live reference to the product's current state — `product`
+(`on_delete=PROTECT`, so a `Product` can never be deleted while any
+order still references it — contrast `Order.user`'s `on_delete=CASCADE`,
+below), `product_size` (nullable/`PROTECT`, for the same reason),
+`unit_price` (the price actually charged, frozen at purchase — see
+`views_stripe.py`'s `_item_unit_price`), `return_policy` (a `TextChoices`
+snapshot of `Product.return_policy` *at the time of purchase* — a
+product's return policy changing later doesn't retroactively change
+whether an already-placed order for it can be returned), and the full
+set of custom-measurement/custom-length fields copied off the `CartItem`
+that produced it.
+
+**What it talks to:** `products/models.py` (`Product`, `ProductSize`,
+`Cart`/`CartItem` — the last two only via `views_stripe.py`, not
+imported here), `accounts`' `User` via `get_user_model()`. Frontend:
+every field on `OrderReadSerializer` (below) is what
+`view/OrderHistory.tsx` and `view/Order.tsx` render directly.
+
+**Watch out for:**
+- `Order.user` is `on_delete=CASCADE` — hard-deleting a `User` row would
+  delete that customer's entire order history with it. No endpoint in
+  this codebase actually hard-deletes a `User`;
+  `DeleteAccountAPIView` (`accounts/views.py`) only soft-deletes via
+  `is_active`/`deleted_at`, exactly so financial records like `Order`
+  survive account deactivation. The `CASCADE` would only matter for a
+  manual hard-delete from a Django shell or the admin's raw delete
+  action — not a path any UI in this app exposes.
+- `status` has three choices (`pending`/`paid`/`canceled`) but
+  **`pending` is effectively unreachable in production**: the only code
+  path that creates an `Order` at all (`views_stripe.py`'s webhook)
+  always passes `status="paid"` explicitly. `OrderCreateSerializer`
+  (`orders/serializers.py`, below) hints at a design where an order
+  might once have been created before payment, but no view uses that
+  serializer today — `pending` only appears via a test or a manually
+  created admin row.
+- `Order.save()`'s email-default check (`if self.user_id and not
+  self.email`) reads `self.user.email`, which triggers a database query
+  for the related `User` on every save of an order with no email set
+  yet — a minor N+1 risk only if `Order.save()` is ever called in a loop
+  without the user already having been fetched; every current call site
+  (`views_stripe.py`'s webhook, the admin actions) already has the
+  `user`/`request.user` object in hand, so this doesn't bite in
+  practice today.
+
+**Interview questions:**
+- *Q: Why generate `public_id` with `secrets.choice` instead of
+  `random.choice`, when this identifier isn't protecting anything the
+  way a password-reset token is?* — It's less about needing
+  cryptographic unpredictability here and more about not having a
+  weaker RNG anywhere near a financial record's identifier at all —
+  `random` is a Mersenne Twister, predictable given enough output, and
+  there's no reason to reach for it just because this particular string
+  isn't a secret; `secrets` is the module this codebase already uses for
+  actual secrets (see `newsletter/tokens.py`), so reusing it here is the
+  path of least surprise, not a security requirement specific to order
+  numbers.
+- *Q: What actually stops two orders from ending up with the same
+  `public_id`, given the generation loop's `exists()` check is racy?* —
+  The `unique=True` constraint on the field itself. The `exists()` check
+  is a fast-path that makes a collision retry astronomically unlikely to
+  ever be needed, but it is not what *guarantees* uniqueness — the
+  database is. A genuine race would surface as an `IntegrityError` on
+  the losing `save()` call (uncaught here — it would propagate to
+  whatever called `.save()`), not as two orders silently sharing a
+  number.
+- **Harder follow-up:** *Q: `Order.email` is filled in from
+  `self.user.email` only when unset, and never touched again after
+  that. Six months later, the customer changes their account email in
+  `accounts/views.py`'s `ProfileAPIView`. What does their old order show
+  now, and is that a bug?* — The old order keeps showing the email it
+  was placed under — `Order.email` is a snapshot, not a live foreign-key
+  lookup, and `ProfileAPIView`'s `PUT` only ever touches `User.email`
+  and `UserProfile`, never any existing `Order` row. This is correct
+  behavior for a financial record (the receipt should reflect what was
+  true when the purchase happened, the same reasoning that keeps
+  `Order.address`/`full_name` as their own columns rather than a live
+  join to `UserProfile`), not a missed cascade — see this guide's
+  "Data privacy and consent" question in Questions by topic for the
+  parallel case of a deactivated account's orders.
+
+### `orders/migrations/`
+
+Seventeen migrations, almost all additive — this app's schema grew field
+by field rather than through any large restructuring. `0001_initial`
+creates `Order`/`OrderItem` with only the fields a first pass at
+checkout needed (`full_name`, `address`, `city`, `postal_code`,
+`country`, `payment_method`, `created_at` — notably no `state`, `email`,
+`status`, or any Stripe field yet). `0002` adds `currency`, `email`,
+`status`, `stripe_checkout_id`, `stripe_payment_intent`, `total_amount`
+in one pass. `0003` adds `OrderItem.product_size`. `0004` adds the
+billing/shipping `state` field — added later than `city`/`postal_code`/
+`country`, which is why it wasn't in the initial model at all. `0005`–
+`0007` are a small, genuine back-and-forth on card display fields: `0005`
+adds `card_brand`/`card_last4`; `0006` **removes** `card_last4` again in
+the same breath it adds `cardholder_name`, replacing it with a
+differently-named `ccard_last4`; `0007` renames `ccard_last4` straight
+back to `card_last4` — three migrations to end up exactly where `0005`
+started plus `cardholder_name`, a rename typo/reconsideration rather
+than a schema change with any lasting effect. `0008` is a cleanup pass:
+widens `payment_method`'s choices with a default, adds `unique=True` to
+`stripe_payment_intent` (**this is the migration that makes the
+webhook's duplicate-order idempotency check into a real database
+guarantee, not just an application-level convention** — see
+`views_stripe.py`'s Interview questions below), and widens
+`OrderItem.size`/`unit_price`. `0009` adds `public_id`. `0010` adds the
+seven `OrderItem` custom-measurement fields. `0011` adds
+`subtotal_amount`/`discount_amount`/`discount_code` and widens
+`OrderItem.size` again (16 → 50 characters). `0012` adds the policy-
+consent fields (`policy_accepted`, `policy_version`,
+`policy_accepted_at`, `custom_size_final_sale_acknowledged`). `0013`
+adds `tax_amount`. `0014` is the largest single migration in this app —
+`delivered_at`, the entire refund field group (`refund_status`,
+`refund_initiated_at`, `stripe_refund_id`), the entire return-workflow
+group (`return_status` with its full seven-choice `choices=` list,
+`return_requested_at`, `return_approved_at`, `return_received_at`,
+`return_refunded_at`, `return_rejected_at`), and an `AlterField` on
+`status` (adding the `default="pending"` that's on the model today) —
+one migration for what `models.py`'s own `# ---` section comments group
+into "STRIPE REFUND" and "RETURN WORKFLOW" today. `0015` adds
+`OrderItem.return_policy`. `0016` adds the
+three custom-length fields. `0017` — the most recent — adds
+`tracking_number`, `tracking_carrier`, `shipped_at`, the [[P1-07]] fix
+that made shipping/delivery notifications possible at all.
+
+### `orders/apps.py` and `orders/urls.py`
+
+**`apps.py`** is the minimal `AppConfig` — `default_auto_field` and
+`name` only, no `ready()` override. Unlike `products/apps.py` (which
+exists specifically to import `products/signals.py` and connect the
+back-in-stock receiver — see the Backend — products section's own entry
+and [[P0-01]]), `orders` has no signals module and nothing for `ready()`
+to do.
+
+**`urls.py`** wires five routes under whatever prefix `tresse/urls.py`
+mounts this app at: `my/` (`MyOrdersAPIView`), `<id>/cancel/`
+(`CancelOrderAPIView`), `<id>/return/` (`RequestReturnAPIView`) — all
+three from `views.py` — plus `create-checkout-session/` and `webhook/`
+from `views_stripe.py`. This file is also the concrete evidence for
+[[P1-18]]: it only ever imported `create_checkout_session`/
+`stripe_webhook` from `views_stripe`, never from the ~700-line duplicate
+copy that used to sit in `views.py` — which is exactly why that
+duplicate could rot for as long as it did without breaking anything a
+user could reach.
+
+### `orders/throttles.py`
+
+**What it is:** `StripeIntentAnonThrottle`/`StripeIntentUserThrottle`
+(scopes `stripe_intent_anon`/`stripe_intent_user`), and — verified by
+reading `tresse/settings.py` directly — both scopes have real,
+deliberately tight rates configured in `DEFAULT_THROTTLE_RATES`
+(`5/min` anon, `20/min` user, under a `# Stripe intent spam / abuse`
+comment).
+
+**Watch out for — this is dead code, and the reason it looks alive is
+worth spelling out:** neither class is imported anywhere outside this
+file. `create_checkout_session` (`views_stripe.py`) has no
+`@throttle_classes` decorator at all, so it falls through to
+`REST_FRAMEWORK`'s global `DEFAULT_THROTTLE_CLASSES` —
+`AnonRateThrottle`/`UserRateThrottle` at the generic `anon`/`user`
+scopes (`60/min`/`300/min`). Since the view is `IsAuthenticated`-only,
+`AnonRateThrottle` never applies to it in practice; what actually gates
+repeated Checkout-Session creation today is the **generic 300/min
+per-user rate**, not the `20/min` `stripe_intent_user` rate these two
+classes and their settings entry were clearly built for. This is the
+same shape as `accounts/views.py`'s duplicate throttle classes (per that
+section above) and `orders/views.py`'s pre-[[P1-18]] dead webhook
+copy: a piece of Stripe-abuse-prevention infrastructure that reads as
+wired up — a dedicated module, a settings entry with a comment
+explaining its purpose — but was never actually attached to the one
+view it names itself after.
+
+**Interview question:** *Q: If someone asked you to actually fix this,
+what's the one-line change, and what would you want to verify before
+shipping it?* — Add `throttle_classes = [StripeIntentUserThrottle]` (no
+`Anon` variant needed, since the view requires authentication) to
+`create_checkout_session`. Before shipping: check whether `20/min` is
+actually generous enough for a legitimate customer who abandons and
+retries checkout a few times in a session (each retry calls this
+endpoint again, since there's no idempotency key on the Stripe session
+creation itself — see `views_stripe.py`'s Watch out for below) — a rate
+tuned purely for "stop abuse" could accidentally throttle a real,
+frustrated customer mid-checkout.
+
+### `orders/serializers.py`
+
+**`OrderItemReadSerializer`**: read-only, all fields (`read_only_fields
+= fields`) — `product_name` sourced from `product.name` rather than a
+`ForeignKey`'s default `__str__`, so the frontend gets a plain string
+without needing a second lookup.
+
+**`OrderReadSerializer`**: also fully read-only, nests
+`OrderItemReadSerializer` under `items`. This is the shape
+`MyOrdersAPIView`, `CancelOrderAPIView`, and `RequestReturnAPIView` all
+return — every field `view/OrderHistory.tsx` and `view/Order.tsx` render
+comes from here, including the [[P1-07]] tracking fields and the full
+return-workflow timestamp set.
+
+**`OrderCreateSerializer`** — **unused.** Its own docstring says "Client
+does not send: items, subtotal, discount, tax, total, Stripe IDs, order
+status, return status," describing a design where a client would `POST`
+shipping/contact fields to create a *pending* order before payment. No
+view in this codebase imports or instantiates it — confirmed by
+`grep -rn "OrderCreateSerializer"` finding only its own definition. This
+is the same class of finding as `Order.status`'s unreachable `pending`
+default (`models.py`, above) and the throttle classes just above: three
+independent pieces of evidence for the same underlying fact, that this
+codebase's order-creation design changed at some point from
+"create-then-pay" to "pay-then-webhook-creates," and not every artifact
+of the earlier design was cleaned up when the newer one landed.
+
+**Interview question:** *Q: If `OrderCreateSerializer` is dead, why not
+delete it the way [[P1-18]] deleted the dead duplicate webhook code in
+`views.py`?* — **Unverified** why it specifically survived — one
+plausible reading, from the pattern across this file/`models.py`/
+`throttles.py` together, is that `views.py`'s duplicate webhook code was
+caught because it was large, security-relevant, and actively
+maintained-looking (someone could believe they were fixing a live bug
+in it); a small, clearly-labeled, never-imported serializer with an
+explanatory docstring is a much easier thing to skim past during a
+cleanup pass focused on behavior, since deleting it changes nothing any
+test or running code path depends on either way.
+
+### `orders/emails.py`
+
+**What it is:** every outbound email this app sends, plus the ops-alert
+helper the webhook leans on. Six of the seven public functions here are
+thin: build a subject with `_order_label(order)` (the order's
+`public_id`, falling back to `#{id}`), bail out with no send at all if
+`order.email` is blank, then call the shared `_send_txt_email` helper.
+**The templates themselves — all six — are already covered in depth in
+Backend — email templates above** (which function sends which template,
+from which call site, and the [[P1-09]] public-id-in-body fix); this
+section covers the sending mechanics, not the template content.
+
+**`_send_txt_email`**: one path for every order email —
+`render_to_string`, wrap in `EmailMessage` with `from_email=
+_from_email()` and `reply_to=_reply_to()`, `send(fail_silently=False)`.
+`fail_silently=False` means a real SMTP/Resend failure **raises** here
+— every call site that matters catches it: `views_stripe.py`'s
+`_send_email_after_commit` and `orders/admin.py`'s per-order email loops
+each wrap their own send in `try/except Exception`, so a failed order-
+confirmation or shipping email is logged and skipped rather than
+crashing the request/action that triggered it — but `emails.py` itself
+does not swallow anything; every `send*_email` function here can and
+will raise straight up to its caller on a real send failure.
+
+**`send_checkout_webhook_alert(reason, session_id, payment_intent_id,
+amount, customer_email)`** — the [[P0-08]] alert helper `views_stripe.py`
+calls from seven of the webhook's eight non-idempotent failure branches
+(the eighth, stock shortage, also calls this *and* the refund/customer-
+email pair below). Two independent, separately-guarded steps:
+1. `sentry_sdk.capture_message(...)` with a **fingerprint of
+   `["checkout-webhook-alert", reason]`** — grouping every alert for the
+   same `reason` (e.g. every `cart_signature_mismatch` across every
+   customer) into one Sentry issue rather than one per event, so a
+   recurring problem shows up as one issue with a rising count instead
+   of paging someone fresh for every occurrence. A no-op if Sentry isn't
+   configured (`SENTRY_DSN` unset — see the "Test settings isolation"
+   fix in `docs/fixes-2026-09.md` for why that's guaranteed true in
+   tests).
+2. An email to `settings.SUPPORT_EMAIL` with a plain-text dump of the
+   reason, session id, payment intent id, amount, and customer email —
+   **skipped entirely (not attempted) if `SUPPORT_EMAIL` isn't set**,
+   though step 1 still runs regardless.
+
+Each step has its own `try/except Exception: logger.exception(...)` —
+**deliberately independent**, so a Sentry outage can't suppress the
+support email, and a failing support-email send can't stop the Sentry
+call from having already happened. Both together, or either one alone
+failing, can never raise back into `stripe_webhook` — the webhook must
+always return `200` to Stripe regardless of whether this function's own
+internals succeeded.
+
+**`send_checkout_stock_sold_out_email(to_email, amount, session_id)`**:
+the one customer-facing half of the stock-shortage story — told
+separately from the ops alert above, by `_refund_stock_sold_out_checkout`
+in `views_stripe.py`, only after the Stripe refund call itself
+succeeded.
+
+**What it talks to:** every template in `templates/emails/orders/`
+(see Backend — email templates above for the full table), `sentry_sdk`,
+Django's `EmailMessage`. Called from `views_stripe.py` (confirmation,
+alert, stock-sold-out), `orders/views.py` (canceled, refund-initiated),
+`orders/admin.py` (shipping-confirmation, delivered).
+
+**Watch out for:** `_reply_to()` falls back through
+`SUPPORT_EMAIL` → `DEFAULT_FROM_EMAIL` → `_from_email()`'s own three-way
+fallback (`DEFAULT_FROM_EMAIL` → `EMAIL_HOST_USER` →
+`"no-reply@tresse.com"`) — meaning if none of `SUPPORT_EMAIL`/
+`DEFAULT_FROM_EMAIL`/`EMAIL_HOST_USER` are configured at all, an order
+email's `reply_to` and `from_email` both end up as the same hardcoded
+`no-reply@tresse.com`, a domain that (per [[P1-16]]'s own findings)
+isn't this store's live storefront domain either — an edge case only
+reachable if the deployment is missing settings that should always be
+present in practice.
+
+**Interview questions:**
+- *Q: Why does `send_checkout_webhook_alert` fingerprint the Sentry
+  message by `reason` alone, rather than including the session id or
+  payment intent?* — Grouping is the point: every occurrence of, say,
+  `cart_signature_mismatch` is the same *kind* of problem worth one
+  person investigating once, not once per customer it happens to —
+  including a unique identifier in the fingerprint would make every
+  single alert its own Sentry issue, defeating the grouping and turning
+  a pattern worth noticing into background noise.
+- *Q: What is the one branch of the webhook where this function's
+  ops-only alert isn't the whole story, and why does that branch get
+  more than the other seven?* — Stock shortage. Every other branch
+  alerts a human and stops — a missing user, a signature mismatch, and
+  so on are all situations where the *right* next step genuinely needs a
+  person to look at the specific case. Stock shortage is the one branch
+  where "give the customer their money back" is unambiguously correct
+  regardless of the details, so it's the only one that also calls
+  `send_checkout_stock_sold_out_email` and issues an actual refund with
+  no human in the loop — see `views_stripe.py`'s
+  `_refund_stock_sold_out_checkout` below.
+- **Harder follow-up:** *Q: `send_checkout_webhook_alert`'s two steps
+  (Sentry, email) each swallow their own exception independently. Trace
+  what happens to a checkout that hits `cart_signature_mismatch` if
+  *both* Sentry and the support-email send fail in the same call —
+  does the customer's payment get refunded?* — No, and that's the sharp
+  edge of this design: for every branch except stock shortage, this
+  function *is* the entire remediation path — there's no fallback
+  alerting mechanism if both of its internal steps fail on the same
+  call. The webhook itself doesn't know or care whether the alert
+  actually reached anyone (it can't — both failures are caught and
+  logged, never raised), so it still returns `200` to Stripe. The
+  customer keeps whatever charge Stripe captured, with no order, and the
+  only trace of what happened is whatever `logger.exception` wrote to
+  application logs — which is exactly why [[P0-08]]'s fix was "alert a
+  human," not "alert a human, guaranteed": Sentry and email going down
+  at exactly the same moment as a mismatched cart signature is judged an
+  acceptable residual risk relative to the alternative of, say, blocking
+  the webhook's `200` response on a third-party alerting call
+  succeeding, which would risk turning an alerting failure into a
+  payment-processing failure too.
+
+### `orders/admin.py`
+
+**What it is:** the *only* place four of this app's six status
+transitions can happen at all — `shipped_at`, `delivered_at`, and all
+four return-workflow states past `"requested"` are set exclusively from
+here, never from any customer-facing endpoint. `OrderAdmin` registers
+six actions in two families (shipping, return/refund) plus a read-only
+`OrderItemInline`.
+
+**`_build_tracking_url(carrier, tracking_number)`**: looks `carrier` up
+(uppercased, stripped) in `TRACKING_URL_TEMPLATES`, a four-entry dict
+(USPS/UPS/FEDEX/DHL). Returns `""` — silently, no error, no log — for
+any carrier not in that dict or a blank `tracking_number`. Since
+`Order.tracking_carrier` is free-text (`CharField`, no `choices=`, just
+a `default="USPS"`), a staff member typing `"Usps"`, `"US Postal
+Service"`, or any carrier outside this list of four produces an order
+whose shipping-confirmation email still sends — with a real tracking
+*number* in the body but a silently empty tracking *link*, since the
+template only ever gets whatever `mark_shipped` passes it.
+
+**`mark_shipped`**: for each selected order, one `transaction.atomic()`
+per order (not one transaction around the whole queryset — see this
+section's Interview questions) locks it, requires `status == "paid"`,
+a non-empty `tracking_number`, and no `shipped_at` yet, skipping
+(counted, not erroring) anything that fails those three; on success sets
+`shipped_at = now()` and saves. **Only after the loop finishes** does it
+send `send_shipping_confirmation_email` for every order it just shipped,
+in a **second** loop, deliberately outside any transaction, each in its
+own `try/except` — an SMTP failure for order #3 of ten selected orders
+doesn't affect the DB write already committed for order #3, and doesn't
+stop emails #4–10 from being attempted. Reports three separate counts
+(`shipped`/`skipped`/`failed`) via `self.message_user`.
+
+**`mark_delivered`**: the same two-loop shape — requires `shipped_at`
+set and `delivered_at` not yet set, then sends `send_delivered_email`
+outside the transaction, same per-order try/except and three-count
+report.
+
+**The return/refund family** (`approve_return`, `mark_return_received`,
+`issue_stripe_refund`, `reject_return`) walk `return_status` forward:
+`"requested"` → `approve_return` → `"approved"` → `mark_return_received`
+→ `"received"` → `issue_stripe_refund` → `"refunded"` (Stripe status
+`succeeded`) or `"refund_pending"` (anything else, later flipped to
+`"refunded"` by the `refund.updated` webhook branch — see
+`views_stripe.py`'s `_sync_refund_event`); `reject_return` is available
+from either `"requested"` or `"approved"` and sets `"rejected"`.
+`approve_return`/`issue_stripe_refund` both **re-check** the
+non-returnable/custom-size rules a second time (they don't trust that
+`RequestReturnAPIView` already refused those items when the return was
+first requested) — but neither one re-checks `custom_length_selected`
+the way `RequestReturnAPIView` does; per [[P1-19]]'s own "Observation,
+not changed," a custom-length order can't reach `"requested"` through
+the customer-facing API at all today, so this gap is only reachable if
+`return_status` is set by hand in the admin, and it isn't covered by a
+test.
+
+**`issue_stripe_refund`** is the one action that talks to Stripe, and it
+runs the identical [[P0-09]] three-phase shape as
+`CancelOrderAPIView` (`views.py`, below) — lock-and-mark-`"initiating"`
+in a short transaction, call `stripe.Refund.create` with **no**
+transaction open, record the result in a fresh transaction — down to
+reusing the same `_clear_return_refund_initiating` cleanup-on-failure
+shape and an idempotency key built the same way
+(`return_refund_{id}_{payment_intent}` vs. `views.py`'s
+`cancel_order_{id}_{payment_intent}`). **Unlike `CancelOrderAPIView`,
+this action never calls `send_refund_initiated_email` or
+`send_order_canceled_email`** — confirmed directly against this file's
+imports (only `send_delivered_email`/`send_shipping_confirmation_email`
+are imported here) — so a return refund issued through the admin
+notifies the customer of nothing; the only way they'd find out is
+checking their bank statement or `return_status` on `/orders`. See
+walkthrough 3 in How the pieces fit for the full return lifecycle this
+gap sits inside.
+
+**What it talks to:** `orders/emails.py` (`send_shipping_confirmation_email`,
+`send_delivered_email` only), `stripe.Refund.create`, `orders/models.py`.
+Nothing here is called from the frontend at all — every action in this
+file is reached exclusively through the Django admin UI.
+
+**Watch out for — `shipped_at` and `delivered_at` are locked down
+inconsistently:** `shipped_at` is in `readonly_fields`, so it can only
+ever be set by running `mark_shipped` — a staff member cannot type a
+shipped date into the form directly. **`delivered_at` is not in
+`readonly_fields`**, even though it's listed right next to
+`tracking_number`/`tracking_carrier`/`shipped_at` in the same
+"Shipping" fieldset — confirmed by reading both the `readonly_fields`
+tuple and the fieldset definition directly. A staff member can still
+type a delivery date straight into the change form and save, exactly
+the way [[P1-07]] describes the *original*, pre-fix behavior ("staff had
+to remember to set `delivered_at` by hand"). `mark_delivered`'s own
+`shipped_at`-must-already-be-set gate is real, but it's not the *only*
+way `delivered_at` can be set — it's just the only way that also sends
+`send_delivered_email` and enforces the shipped-before-delivered
+ordering. Since `RequestReturnAPIView`'s 14-day return window is counted
+from `delivered_at` directly, a hand-typed `delivered_at` on an order
+that was never actually marked shipped would still start that customer's
+return-window clock, with no shipping-confirmation email ever having
+gone out.
+
+**Interview questions:**
+- *Q: Why does each action wrap every order in its own
+  `transaction.atomic()` inside the loop, instead of one
+  `transaction.atomic()` around the whole `queryset` loop?* — So one
+  order's failure can't undo work already committed for a different
+  order in the same bulk action. If `mark_shipped` is run against ten
+  orders and the ninth raises, one outer transaction would roll back all
+  nine that already succeeded along with it; per-order transactions mean
+  the first eight stay shipped and only the ninth (and whatever comes
+  after) is left unprocessed — consistent with every action's
+  skip/failure counts being reported as partial results, not all-or-
+  nothing.
+- *Q: Why does `mark_shipped` send emails in a second loop, entirely
+  after the first loop that does all the database writes, rather than
+  sending each order's email right after its own `transaction.atomic()`
+  block inside the same loop iteration?* — Functionally the two shapes
+  would behave almost identically here, since each order's DB write is
+  already committed independently by the time its own atomic block
+  exits — but keeping every database write in the first loop and every
+  network call in the second keeps the "did the DB update succeed" and
+  "did the email send succeed" concerns visibly separate in the code,
+  matching this file's own three-count reporting (`shipped`/`skipped`/
+  `failed` are about two different kinds of failure — an ineligible
+  order vs. a failed send — and the two-loop structure is what makes
+  that distinction easy to compute correctly).
+- **Harder follow-up:** *Q: A staff member selects an order that is
+  currently `status="paid"`, `return_status="requested"`, and runs
+  `issue_stripe_refund` against it by mistake, before running
+  `approve_return`/`mark_return_received` first. What happens?* — It's
+  skipped, not refunded: `issue_stripe_refund`'s own eligibility check
+  requires `return_status == "received"` before it does anything else,
+  so an order still sitting at `"requested"` fails that check on its
+  first line and is counted in `skipped`, with Stripe never called at
+  all. The four-stage `requested → approved → received → refunded`
+  sequence is enforced entirely by each action independently checking
+  the *previous* stage's exact value — there's no separate state-machine
+  object; running any action out of order just produces a same-order
+  no-op counted as a skip, never an error and never a transition to the
+  wrong state.
+
+### `orders/views.py`
+
+**What it is:** everything a *customer* can do to their own orders after
+checkout — read them, cancel one, request a return on one. This file
+used to also hold a byte-for-byte duplicate of the Stripe checkout/
+webhook code until [[P1-18]] deleted it; what remains is exactly the
+three classes below plus the small helpers they share.
+
+**`MyOrdersAPIView`** (`IsAuthenticated`): `GET` only, no pagination
+(matching `view/OrderHistory.tsx`'s own assumption — see that file's
+entry above), `.order_by("-created_at")`, `prefetch_related`s every
+relation `OrderReadSerializer` needs (`items`, `items__product`,
+`items__product_size`, `items__product_size__product`,
+`items__product_size__size`) up front, so serializing every order in the
+list touches the database once, not once per order per relation.
+
+**`CancelOrderAPIView`** (`IsAuthenticated`) is the customer-facing half
+of the [[P0-09]] three-phase refund pattern this guide's Glossary
+documents in general terms; here's the concrete version:
+1. **Phase 1** — one short `transaction.atomic()`: `select_for_update()`s
+   the order (scoped to `id=order_id, user=request.user`, so someone
+   else's order id 404s instead of 403-ing — no information leak about
+   whether the id exists at all), then runs six sequential eligibility
+   checks in order (must exist → must be `status="paid"` → inside the
+   24-hour `CANCEL_WINDOW` of `created_at` → no `return_status` already
+   set → no `stripe_refund_id` already set → has a
+   `stripe_payment_intent` at all → not already `refund_status ==
+   "initiating"`), any of which returns immediately with a specific 400/
+   404. If every check passes, sets `refund_status = "initiating"` and
+   `refund_initiated_at = now()`, saves, and the `with` block exits —
+   **the transaction, and the row lock with it, ends here.**
+2. **Phase 2** — no transaction open at all: `stripe.Refund.create(
+   payment_intent=order.stripe_payment_intent, idempotency_key=
+   f"cancel_order_{order.id}_{order.stripe_payment_intent}")`. If this
+   raises (`StripeError` or anything else), `_clear_cancel_refund_initiating`
+   best-effort-resets the `"initiating"` marker back to empty (itself
+   wrapped in its own `try/except` so a *cleanup* failure can't mask the
+   real error being returned) and the view responds 400/500 — nothing
+   was charged, so nothing needs reconciling.
+3. **Phase 3** — a fresh `transaction.atomic()`: re-locks the same order
+   by primary key, sets `status = "canceled"`, records the real
+   `stripe_refund_id`/`refund_status` from Stripe's response, and — via
+   two separate `transaction.on_commit(...)` calls — queues both
+   `send_order_canceled_email` and `send_refund_initiated_email`. **If
+   this phase itself raises**, the `"initiating"` marker is deliberately
+   **left in place**, not cleared — see this section's Interview
+   questions for why that asymmetry with phase 2's cleanup is the
+   correct choice, not an oversight.
+
+A response with no `id` field from Stripe (`refund.get("id")` empty)
+is treated as its own failure case — `_clear_cancel_refund_initiating`
+runs and the view returns `502 Bad Gateway`, distinct from every other
+error path's `400`/`500`, since this specifically means "Stripe's API
+gave us something we can't parse," not "the request was invalid" or
+"our own code broke."
+
+**`RequestReturnAPIView`** (`IsAuthenticated`): one `transaction.atomic()`,
+no Stripe call at all (a return *request* only changes `return_status`
+to `"requested"` — money doesn't move until an admin runs
+`issue_stripe_refund`, days or weeks later). Seven sequential checks:
+exists → `status == "paid"` → `delivered_at` is set → inside the 14-day
+`RETURN_WINDOW` of `delivered_at` (not `created_at` — the [[P1-06]]
+distinction `view/OrderHistory.tsx`'s own section discusses) → no
+existing `return_status` → no item with `size__iexact="CUSTOM SIZE"` →
+no item with `custom_length_selected=True` → no item whose
+`return_policy` is `FINAL_SALE` → no item whose `return_policy` is
+`NON_RETURNABLE_HYGIENE`. Each failure returns a distinct, customer-
+readable message (`view/OrderHistory.tsx`'s `requestReturn` surfaces
+these directly via `error.response.data.detail`). No email is sent from
+this view at all — the customer's own successful response is
+confirmation enough; see walkthrough 3 in How the pieces fit.
+
+**What it talks to:** `orders/emails.py` (`send_order_canceled_email`,
+`send_refund_initiated_email`), `stripe.Refund.create`, `.serializers`
+(`OrderReadSerializer`), `.models` (`Order`, `OrderItem`). Frontend:
+`view/OrderHistory.tsx` (`MyOrdersAPIView` via `GET /orders/my/`,
+`CancelOrderAPIView` via `POST /orders/{id}/cancel/`,
+`RequestReturnAPIView` via `POST /orders/{id}/return/`), `view/Order.tsx`
+(`MyOrdersAPIView` only, for the first-order promo check).
+
+**Watch out for:** `CancelOrderAPIView`'s eligibility checks and
+`RequestReturnAPIView`'s are **independently written out**, not shared
+through a common helper, despite overlapping on "must be `status ==
+"paid"`" and "must not already have a `return_status`" — a future rule
+change to either shared condition would need to be applied in both
+places by hand, the same "logic duplicated instead of extracted"
+pattern this guide has flagged elsewhere (e.g. the price-composition
+logic independently implemented in `Cart.tsx`/`Order.tsx`/
+`ProductDetails.tsx`, per that section above).
+
+**Interview questions:**
+- *Q: Why must `stripe.Refund.create` run with no Django transaction
+  open, when it would be simpler to keep the whole cancel operation
+  inside one `transaction.atomic()` block?* — Two separate reasons,
+  both real: first, `select_for_update()` in phase 1 takes a row-level
+  lock that would otherwise be held for however long the network round-
+  trip to Stripe takes — anywhere from tens of milliseconds to several
+  seconds under load or a slow Stripe response — serializing every
+  other request touching that same order (a concurrent read, a webhook
+  processing a refund event for it) behind that call for no reason
+  related to the database itself. Second, a network call inside a
+  transaction that later rolls back for an unrelated reason (a
+  post-Stripe-call `save()` failing, a dropped DB connection) would mean
+  Stripe already processed the refund while the database silently
+  behaves as if it never happened — the worst version of this bug,
+  since it's invisible until someone manually reconciles against Stripe.
+  Splitting into three phases means the row is only ever locked for the
+  two short, purely-local phases, and phase 2's Stripe call — whatever
+  it does — can never be undone by a Django rollback, because there's no
+  open transaction left for anything to roll back.
+- *Q: If two cancel requests for the same order arrive at nearly the
+  same instant, what actually stops both from calling
+  `stripe.Refund.create`?* — Not the row lock — by the time either
+  request reaches phase 2, its own phase-1 transaction (and the lock
+  with it) has already been released. What stops the second request is
+  the `refund_status == "initiating"` check *inside* phase 1: the first
+  request's phase 1 sets that marker and commits before the second
+  request's phase 1 even starts (phase 1's `select_for_update()` makes
+  the two phase-1 transactions themselves mutually exclusive, however
+  briefly), so the second request's own phase-1 checks see
+  `refund_status == "initiating"` already set and return 400 before ever
+  reaching phase 2 at all. The marker, not a lock held across the
+  network call, is what does the actual work here — matching this
+  guide's Glossary entry on the three-phase refund pattern.
+- **Harder follow-up:** *Q: Phase 2's Stripe failure clears the
+  `"initiating"` marker; phase 3's failure deliberately does not. Why is
+  that asymmetry correct rather than a bug?* — The two phases fail at
+  fundamentally different points relative to whether money actually
+  moved. A phase-2 failure means `stripe.Refund.create` itself didn't
+  succeed — nothing happened at Stripe, so clearing the marker back to
+  "no refund in progress" accurately reflects reality and lets the
+  customer retry cleanly. A phase-3 failure happens **after** Stripe has
+  already returned a successful refund response — the money is already
+  moving (or moved) at Stripe's end regardless of what Django does next;
+  clearing the marker here would make the order look exactly like
+  "nothing was ever attempted," silently hiding a refund that genuinely
+  happened. Leaving `refund_status: "initiating"` stuck is the version
+  of this failure that stays *discoverable* — someone reconciling orders
+  against the Stripe dashboard would immediately notice an order stuck
+  in that state and know to go look at what Stripe actually shows for
+  it, rather than the order looking identical to one nothing ever
+  happened to.
+
+### `orders/views_stripe.py`
+
+**What it is:** the file the Stripe integration actually lives in —
+1,231 lines, the largest file in this app by a wide margin, and the only
+place an `Order` row is ever created. Two `@api_view` functions
+(`create_checkout_session`, `stripe_webhook`) plus roughly a dozen module-
+level helpers, several of which exist purely to keep the webhook handler
+itself from becoming unreadable.
+
+**Money-handling helpers, as a group:** `_safe_decimal(value)` wraps
+`Decimal(str(value or "0"))` in a broad `except (TypeError, ValueError,
+ArithmeticError)` returning `Decimal("0")` — used everywhere a price
+comes from a place that could plausibly be malformed (a product's price
+field, a cart item's surcharge). `_money_to_cents`/`_cents_to_money` are
+each other's inverse, converting between this codebase's `Decimal`
+dollar amounts and the integer-cent amounts Stripe's API requires
+everywhere (`unit_amount` on a line item, `amount_total`/
+`amount_subtotal`/`amount_discount`/`amount_tax` read back off a
+session) — `_money_to_cents` uses `Decimal.quantize(Decimal("1"),
+rounding=ROUND_HALF_UP)` specifically so a price like `$19.995` (which
+shouldn't exist in this catalog, but could in principle from a
+discount calculation) rounds to the nearest cent deterministically
+rather than however Python's default float rounding would land, and
+never touches a `float` at any point in the conversion — the classic
+"don't use binary floating point for money" rule, followed here by
+routing every dollar amount through `Decimal` end to end.
+
+**`_item_unit_price(item)`**: base product price, plus
+`custom_length_surcharge` **only if** `item.custom_length_selected` is
+true — this is the backend's own copy of the same price-composition
+logic `Cart.tsx`'s `getServerUnitPrice`, `Order.tsx`'s inline
+`cartLines` calculation, and `ProductDetails.tsx`'s `displayPrice` each
+implement independently on the frontend (flagged in `Cart.tsx`'s own
+Watch out for, above) — here it's the one place that actually
+determines what Stripe is told to charge and what gets frozen onto
+`OrderItem.unit_price`, so a frontend/backend disagreement about this
+formula would show up as "the price I saw on `/cart` doesn't match what
+Stripe charged me," not merely a display bug.
+
+**`_build_cart_signature(items)`**: builds a stable fingerprint of a
+cart's contents at the moment `create_checkout_session` runs, so the
+webhook can later detect if the cart changed between session creation
+and payment completion. For each item, joins eleven fields — `
+product_size_id`, `quantity`, all seven custom-measurement strings,
+`custom_length_selected`, `custom_length_cm`, `custom_length_surcharge`
+— with `|`, then joins every item's string with `||` **after sorting
+the list of per-item strings** (so the signature doesn't depend on
+which order the cart's rows happen to come back from the database in),
+and SHA-256-hashes the result, truncated to 24 hex characters.
+Deliberately **does not include price** — price is separately re-derived
+from `_item_unit_price` at both session-creation and webhook time using
+the exact same function, so it can't drift independently of the fields
+the signature actually covers; the signature's job is narrower: "is this
+still the same set of items, sizes, quantities, and customizations," not
+"is the total the same."
+
+**`create_checkout_session`** (`IsAuthenticated`, no explicit throttle —
+see `orders/throttles.py`'s Watch out for above): fetches the user's
+`Cart`, 400s if empty. Requires `policy_accepted is True` in the request
+body (not merely truthy — an explicit boolean check), and separately
+requires `custom_size_final_sale_acknowledged is True` **only if**
+`_cart_has_custom_size`/`_cart_has_custom_length` finds any qualifying
+line — matching `view/Order.tsx`'s two-checkbox consent UI exactly.
+Builds one Stripe line item per cart line: a best-effort **pre-check**
+against `product_size.quantity < item.quantity` (400s immediately with
+the specific product/size name if short — see this section's Interview
+questions for why this doesn't make the webhook's own re-check
+redundant), the first product image by `sort_order` as `images`, and a
+`price_data.product_data.metadata` block carrying `product_size_id`/
+`custom_length_selected`/`custom_length_cm`/`custom_length_surcharge` —
+metadata that, notably, **the webhook never reads back off the line
+items at all**; the webhook re-derives everything it needs from the
+live `CartItem` rows via `cart_id`, not from anything embedded in the
+Stripe session's line items. Session-level `metadata` (distinct from
+each line item's own) carries `user_id`, `cart_id`, `cart_sig`
+(the signature above), `is_first_order`/`welcome_code` (computed from
+`_user_has_paid_order`, the same "has this user ever paid" question
+`Order.tsx`'s own `isFirstOrder` check answers independently against
+`/orders/my/`), and the policy-consent flags. `success_url`/`cancel_url`
+are built from `settings.FRONTEND_URL` directly — the [[P1-16 (part 2)]]
+fix removed a hardcoded-wrong-domain `getattr(..., "https://www.
+tresseknitting.com")` fallback that was already dead code, since
+`FRONTEND_URL` has no default in `settings.py` and Django won't start
+without it.
+
+**`stripe_webhook`** (`csrf_exempt`, `AllowAny`) — **why those two
+decorators together, specifically:** this endpoint is never called by a
+logged-in browser session at all; it's called server-to-server by
+Stripe, which has no Django session or CSRF cookie to present and can't
+authenticate as any of this app's users — `AllowAny` isn't a security
+hole here because the real gate is what happens next.
+
+- **Signature verification is the actual authentication for this
+  endpoint**, and it's the very first thing that happens:
+  `stripe.Webhook.construct_event(payload, sig_header,
+  settings.STRIPE_WEBHOOK_SECRET)` — this checks that the raw request
+  body was signed with the secret only Stripe and this app's settings
+  know, using the `Stripe-Signature` header (read via
+  `request.META.get("HTTP_STRIPE_SIGNATURE")`, not any custom scheme).
+  Any failure — a missing/malformed header, a body that doesn't match
+  its signature, a wrong secret — is caught by a bare `except Exception`
+  and answered with `400`, logged only as `stripe_webhook_invalid_signature`
+  (no further detail logged, deliberately, since a signature-verification
+  failure is exactly the kind of thing an attacker probing the endpoint
+  would also trigger, and the response gives them nothing to learn from).
+  If `STRIPE_WEBHOOK_SECRET` itself isn't configured at all, the view
+  short-circuits with `500` **before** even attempting verification —
+  refusing to run in a mode where anyone could post an unsigned event
+  and have it accepted.
+- **Refund events** (`refund.created`/`refund.updated`/`refund.failed`)
+  are handled first and separately, entirely by `_sync_refund_event` —
+  covered under this section's own entry below — then the webhook
+  returns immediately; nothing past this point in the function applies
+  to a refund event at all.
+- **Every other event type except `checkout.session.completed`** is
+  acknowledged with `200`/`{"ok": true}` and otherwise ignored — Stripe
+  sends many event types this app has no reason to act on, and silently
+  200-ing the ones it doesn't handle is what stops Stripe from retrying
+  them forever.
+- **The `checkout.session.completed` branches**, in the order they're
+  checked, each following the identical shape (log an `error`, compute a
+  best-effort `amount`/`customer_email` via `_session_amount_and_email`
+  straight off the raw session dict — since at this point there may be
+  no `Order` and no parsed amounts to reference yet — call
+  `send_checkout_webhook_alert` with a reason string, return `200`):
+  1. **`missing_metadata`** — no `user_id`, `cart_id`, or
+     `payment_intent` at all in the session; nothing downstream could
+     possibly succeed.
+  2. **`user_not_found`** — `user_id` doesn't resolve to a real `User`.
+  3. **`cart_not_found`** — `cart_id` doesn't resolve to a `Cart` owned
+     by that user.
+  4. **`empty_cart`** — the cart has no `CartItem` rows. **This is the
+     one branch with an extra check before alerting**: a legitimate
+     retry delivery of an *already-processed* event lands here too,
+     since the original processing already deleted the cart's items —
+     `already_processed = Order.objects.filter(user=, stripe_payment_intent=
+     ).exists()` gates the alert, so a duplicate delivery of a
+     successfully-processed checkout stays silent instead of paging
+     someone for nothing (this is the [[P0-08]] fix's own fix-within-a-
+     fix — the empty-cart branch originally ran *before* any idempotency
+     check at all, so every duplicate delivery of a normal successful
+     checkout used to alert).
+  5. **`policy_consent_missing`** — `policy_accepted` false or
+     `policy_version` blank in the session metadata.
+  6. **`custom_ack_missing`** — the cart has a custom-size or
+     custom-length line but `custom_size_final_sale_acknowledged` is
+     false.
+  7. **`cart_signature_mismatch`** — `_build_cart_signature` over the
+     *current* cart items no longer matches `cart_sig` from the
+     session's metadata; the cart changed between checkout-session
+     creation and payment completion.
+  8. **(after the idempotency check below) `stock_insufficient`** — the
+     one branch that also refunds and emails the customer; see below.
+
+  Between branches 7 and 8 sits the **idempotency check** proper:
+  `Order.objects.filter(user=, stripe_payment_intent=).first()` — if an
+  `Order` for this exact payment intent already exists, return `200`
+  immediately with **no alert at all**, since this is the expected,
+  routine case of Stripe redelivering an event this endpoint already
+  handled successfully (Stripe's delivery model is at-least-once, not
+  exactly-once — a webhook endpoint that isn't idempotent *will*
+  eventually create duplicate orders, not just theoretically).
+- **Order creation**, once every check above has passed, happens inside
+  one `transaction.atomic()`: `select_for_update()`s each cart item's
+  `ProductSize` and re-checks `quantity < cart_item.quantity` **again**
+  — this is the check that actually matters, since arbitrary real time
+  (filling in a card number, an address, 3-D Secure) can pass between
+  `create_checkout_session`'s own best-effort pre-check and payment
+  actually completing, during which someone else could have bought the
+  last unit. If any line is short, a `stock_shortage` dict is set and
+  the locking loop `break`s — **not `return`s** — so the `with
+  transaction.atomic()` block itself still exits normally, with nothing
+  written (see this section's own entry on why that distinction
+  matters). If stock holds, the block creates the `Order`, one
+  `OrderItem` per cart line (copying `unit_price` from `_item_unit_price`,
+  `return_policy` from the *product's current* `return_policy` — another
+  purchase-time snapshot, matching `OrderItem.return_policy`'s own entry
+  in `models.py` above), decrements each `ProductSize.quantity` (the
+  exact write `products/signals.py`'s back-in-stock guard has to
+  distinguish from a genuine restock — see [[P0-02]] and walkthrough 4),
+  deletes the cart's `CartItem` rows, and schedules
+  `send_order_confirmation_email` via `transaction.on_commit` — a
+  closure capturing `order.id` (not the in-memory `order` object itself)
+  that **re-fetches** the order fresh from the database once the
+  transaction has actually committed, rather than trusting the
+  in-transaction instance, so the email is built from what's actually
+  durable.
+- **The stock-shortage refund, deliberately outside the transaction
+  entirely:** `stock_shortage` is checked **after** the `try/except`
+  wrapping the whole `transaction.atomic()` block has already exited —
+  by the time `_refund_stock_sold_out_checkout(payment_intent_id,
+  session_id, email, total_amount)` runs, there is no open transaction
+  anywhere in this call stack. That function itself calls
+  `stripe.Refund.create(idempotency_key=f"stock_sold_out_refund_
+  {payment_intent_id}")` in its own `try/except` (a `StripeError` or any
+  other exception is logged and swallowed, and the function simply
+  `return`s — no email is attempted if the refund call itself failed),
+  and only on a successful refund does it call
+  `send_checkout_stock_sold_out_email` in a second, separately-guarded
+  `try/except`. This is the same "network call, no open transaction"
+  discipline as `CancelOrderAPIView`'s phase 2 (`views.py`, above) — the
+  one difference being there's no phase-1/phase-3 split needed here at
+  all, since nothing was ever written to the database for this order in
+  the first place; there's nothing to mark `"initiating"` and nothing to
+  roll back.
+
+**`_sync_refund_event(refund)`**: handles `refund.created`/`.updated`/
+`.failed` webhook deliveries — a **separate** event stream from
+`checkout.session.completed`, arriving whenever a refund's status
+changes at Stripe's end, including asynchronously after
+`issue_stripe_refund` (`admin.py`) or `CancelOrderAPIView` (`views.py`)
+already recorded an initial (possibly `"pending"`) status. Looks the
+order up by `stripe_refund_id` (not payment intent) under its own
+`transaction.atomic()` + `select_for_update()`, updates `refund_status`
+to whatever the event reports, and — **only** if the new status is
+`"succeeded"` **and** the order's `return_status` is currently
+`"refund_pending"` — flips it to `"refunded"` and stamps
+`return_refunded_at`. An order not found by that refund id logs a
+warning and returns quietly (not every refund Stripe processes
+necessarily belongs to this store, and a webhook must never error on an
+event it simply doesn't recognize). Any other exception during the
+update is logged and **re-raised**, unlike every other failure path in
+this file, which logs and either continues or returns `200` — the
+caller, `stripe_webhook`'s own `try: _sync_refund_event(refund) except
+Exception:` around this call, catches that re-raise immediately and
+turns it into an explicit `500`. This is the **only** branch of the
+entire webhook that ever responds with anything other than `200` for an
+event it otherwise understood how to handle — and a `500` is
+deliberate here, not an oversight: it's the one signal that tells
+Stripe "this didn't work, please retry delivery," for the one event
+type (a refund status change) where losing the update silently would
+leave `refund_status`/`return_status` stuck out of sync with what
+actually happened at Stripe, with no other mechanism to notice.
+
+**What it talks to:** `products/models.py` (`Cart`, `CartItem`),
+`.emails` (`send_order_confirmation_email`,
+`send_checkout_webhook_alert`, `send_checkout_stock_sold_out_email`),
+`.models` (`Order`, `OrderItem`), the Stripe SDK throughout
+(`checkout.Session.create`, `Webhook.construct_event`,
+`PaymentIntent.retrieve`, `Refund.create`). Frontend: `view/Order.tsx`
+(`create_checkout_session` via `POST
+/orders/create-checkout-session/`), and — indirectly, since Stripe calls
+this server-to-server, never the browser — the redirect this endpoint's
+sibling produces is what lands the customer on `view/OrderSuccess.tsx`.
+`view/Cart.tsx`'s cart state is what `create_checkout_session` reads via
+`Cart`/`CartItem`, one hop removed.
+
+**Watch out for:**
+- **`stripe.checkout.Session.create` itself has no `idempotency_key`** —
+  every `stripe.Refund.create` call in this codebase (here and in
+  `views.py`/`admin.py`) passes one, but session creation doesn't. A
+  network retry, a double-click past whatever frontend debouncing exists,
+  or a legitimate customer hitting back and re-submitting checkout each
+  creates a **separate** Stripe Checkout Session with its own payment
+  intent — not a risk of a duplicate `Order` row (the webhook's own
+  `stripe_payment_intent` idempotency check and the field's `unique=True`
+  constraint handle that), but a real risk of two live, independently
+  payable sessions existing for the same cart at once, whose interaction
+  with `create_checkout_session`'s own missing throttle (see
+  `orders/throttles.py` above) compounds the exposure rather than
+  mitigating it.
+- **`create_checkout_session`'s stock pre-check is advisory, not
+  authoritative** — it exists purely so an obviously-out-of-stock add
+  gets rejected before the customer is sent to Stripe's page at all, not
+  because it prevents the race the webhook's own `select_for_update()`
+  re-check actually guards against; see this section's Interview
+  questions for the concrete timeline where the pre-check passes and the
+  webhook's re-check is the only thing standing between two customers
+  and the same last unit.
+- `_extract_card_details_from_payment_intent` makes a **second** live
+  call to Stripe (`PaymentIntent.retrieve`) from inside the same request
+  that's already processing a webhook delivery, purely to populate
+  `card_brand`/`card_last4` for display — any failure here (a timeout, a
+  transient Stripe error) is caught and logged, falling back to empty
+  strings rather than failing order creation over cosmetic card-display
+  data, but it does mean a slow or flaky Stripe API can make the webhook
+  handler itself slower or occasionally fail to populate these two
+  fields even on an otherwise fully successful order.
+
+**Interview questions:**
+- *Q: Walk through exactly what stops Stripe's at-least-once webhook
+  delivery from ever creating two `Order` rows for one payment.* — Two
+  layers, deliberately redundant: the application-level check
+  (`Order.objects.filter(user=, stripe_payment_intent=).first()`, run
+  before any write) handles the overwhelmingly common case of a
+  straightforward duplicate delivery cheaply and returns `200` with no
+  alert. The **real** guarantee is `Order.stripe_payment_intent`'s
+  `unique=True` constraint (added in migration `0008`) — if two
+  deliveries for the same event somehow raced past the application
+  check at the same instant (a genuine TOCTOU window, since the check
+  and the later `Order.objects.create()` aren't in the same lock), the
+  second `create()` call would raise `IntegrityError` inside the
+  `transaction.atomic()` block, get caught by the surrounding
+  `except Exception`, log `checkout_order_creation_failed`, and return
+  `500` — which tells Stripe to retry. On that retry, the application-
+  level check now finds the first delivery's order and returns a clean
+  `200`. The database constraint is what actually makes duplication
+  impossible; the application check is what makes the common case cheap
+  and silent instead of an error-then-retry round trip every time.
+- *Q: The webhook's stock-shortage branch breaks out of the locking loop
+  instead of returning from inside `transaction.atomic()`. Why does that
+  specific detail matter?* — Because the refund that follows
+  (`_refund_stock_sold_out_checkout`, calling `stripe.Refund.create`)
+  must run with **no transaction open at all** — the same "don't hold a
+  lock or a transaction open across a network call" rule
+  `CancelOrderAPIView`'s three-phase pattern exists for. A bare `return`
+  from inside the `with transaction.atomic():` block would still exit
+  the block cleanly in this specific case (nothing was written, so
+  there's nothing to roll back either way) — but writing it as `break`
+  the loop and letting the `with` block's own natural exit close the
+  transaction, then checking `stock_shortage is not None` **after** the
+  `try/except` around the whole block, makes the "the transaction is
+  fully closed by the time we call Stripe" property visible and
+  structural in the code, not just true by accident of what happens to
+  be written on either side of a `return`.
+- **Harder follow-up:** *Q: Trace the exact interaction between
+  `create_checkout_session`'s stock pre-check and the webhook's
+  `select_for_update()` re-check for two customers, A and B, both trying
+  to buy the last unit of the same product/size, where A completes
+  Stripe's payment form in eight seconds and B takes four minutes on the
+  same page.* — Both A and B's checkout-session creation calls can
+  legitimately pass the pre-check (`product_size.quantity < 
+  item.quantity`) if they happen close enough together that neither has
+  paid yet — the pre-check only compares against whatever `quantity`
+  currently reads at that instant, with no lock, so it says nothing
+  about what happens between then and either customer actually paying.
+  A pays first; A's webhook delivery takes the `select_for_update()`
+  lock, sees stock still available, creates the order, and decrements
+  `quantity` to zero, releasing the lock when its transaction commits.
+  When B eventually pays and B's webhook delivery arrives, it takes the
+  same `select_for_update()` lock (waiting behind A's if the two
+  webhooks ever briefly overlapped, though four minutes apart they
+  almost certainly won't), sees `quantity` now at zero, and takes the
+  `stock_insufficient` branch — no order for B, an ops alert, an
+  automatic Stripe refund, and `send_checkout_stock_sold_out_email`
+  telling B their payment was refunded because the item sold out. B's
+  own `create_checkout_session` pre-check passing four minutes earlier
+  never promised B anything — it was only ever a same-instant read, and
+  the webhook's lock-and-recheck is the actual, and only, authority on
+  whether stock exists at the moment it's about to be permanently
+  decremented.
+
+### `orders/tests.py`
+
+1,628 lines — the largest test file in either backend app section of
+this guide, and, per [[P1-19]], largely written to specifically pin down
+the money-moving paths that had no coverage at all before that pass.
+`stripe.Refund.create`/`stripe.Webhook.construct_event` are mocked at
+every call site across the file — **no test in this suite calls real
+Stripe**, confirmed structurally by every Stripe-touching test carrying
+its own `@patch`, and reinforced at the settings layer by the "Test
+settings isolation" fix (`docs/fixes-2026-09.md`), which guarantees
+`STRIPE_SECRET_KEY` is a dummy value in the test environment regardless.
+
+**Test classes exist because a bug was found, not just for coverage, in
+two identifiable places:**
+- **[[P0-09]]'s proof tests** — `test_cancel_stays_discoverable_when_
+  recording_the_result_fails` and its `issue_stripe_refund` counterpart
+  patch `Order.save` itself with a function that raises only when the
+  `update_fields` passed include `"status"` (phase 3's save, not phase
+  1's "initiating"-only save), so the test can assert precisely that a
+  refund already issued at Stripe (the mock `stripe.Refund.create` was
+  genuinely called) leaves `refund_status: "initiating"` rather than
+  reverting — the exact "discoverable, not silently lost" property
+  [[P0-09]]'s fix exists for. **`test_cancel_calls_stripe_outside_the_
+  views_own_atomic_block`** (and its admin-action counterpart) go
+  further than asserting behavior: they read
+  `connection.savepoint_ids` — Django's actual live transaction-nesting
+  depth — both before the request and from *inside* the mocked
+  `stripe.Refund.create` call itself, and assert the two depths are
+  identical, which is a structural proof that Stripe was called at the
+  same nesting level as ordinary request handling, not one level deeper
+  inside phase 1's `transaction.atomic()`. This is a meaningfully
+  stronger claim than "the response looked right" — it's a test that
+  would fail if a future refactor accidentally nested the Stripe call
+  back inside a transaction, even if every other assertion in the test
+  still passed.
+- **[[P0-08]]'s `CheckoutWebhookAlertTestCase`/
+  `CheckoutWebhookAlertHelperTestCase`** — one test per alert branch
+  (all eight), plus the duplicate-delivery-stays-silent case for
+  `empty_cart` specifically, plus dedicated tests proving the alert
+  helper's two internal steps (Sentry, support email) genuinely fail
+  independently of each other (a failing Sentry call still lets the
+  email attempt happen; a failing email send doesn't retroactively
+  un-call Sentry; no `SUPPORT_EMAIL` configured skips the email but
+  still calls Sentry) — see `orders/emails.py`'s Harder follow-up above
+  for exactly the gap these tests are drawing a hard edge around.
+
+**[[P1-19]] itself is the odd one out — 32 new tests, and the result
+section says so directly: "All 32 new tests passed on the first run
+against the current code... no bug was found and none was fixed."** This
+is the suite's `MyOrdersAPITestCase`, `CancelOrderAPITestCase` (10
+tests — every eligibility check in `CancelOrderAPIView` individually,
+plus the Stripe-error and missing-refund-id paths), `RequestReturnAPITestCase`
+(12 tests — every one of `RequestReturnAPIView`'s seven checks), and
+`OrderAdminReturnActionsTestCase` (7 tests — the return/refund admin
+actions, including proving `issue_stripe_refund` calls Stripe **only**
+for orders that actually qualify, out of a mixed batch). Its own "not
+changed" note — that `approve_return`/`issue_stripe_refund` don't
+recheck `custom_length_selected` — is stated as an observed gap, left
+deliberately untested and unfixed, rather than silently glossed over
+(see `orders/admin.py`'s own entry above for the reachability caveat
+that makes it low-risk today).
+
+**Other groups worth naming:** `OrderPublicIdTestCase`/
+`OrderSaveLogicTestCase`/`OrderPaymentIntentTestCase` exercise
+`models.py`'s `save()` logic directly against the ORM, no HTTP involved
+— including `test_duplicate_payment_intent_raises`, which asserts
+`IntegrityError` on a second `Order.objects.create()` with a repeated
+`stripe_payment_intent`, the most direct possible proof of the unique
+constraint this guide's `views_stripe.py` Interview questions lean on.
+`CheckoutSessionCompletedTestCase` covers the happy path end to end (an
+order is created, `OrderItem` rows match, stock decrements, the cart
+empties) plus `test_duplicate_webhook_is_idempotent` (posts the identical
+event twice, asserts exactly one `Order` exists) and
+`test_insufficient_stock_does_not_create_order` (asserts no order, stock
+unchanged, and the refund mock called exactly once).
+`OrderAdminShippingActionsTestCase` covers [[P1-07]]'s two actions —
+happy path (email sent, timestamp set) and skip path (ineligible order
+untouched, no email) for both.
+
+**Interview questions:**
+- *Q: `test_cancel_calls_stripe_outside_the_views_own_atomic_block`
+  asserts on `connection.savepoint_ids` rather than, say, mocking
+  `transaction.atomic` and asserting it wasn't entered around the Stripe
+  call. Why is reading the real savepoint depth the stronger test?* —
+  Mocking `transaction.atomic` (or patching it to a no-op) would prove
+  the test's *own* understanding of the code's structure, not the code's
+  actual behavior — a refactor could change how transactions are nested
+  without the mock ever noticing, since the mock only records that it
+  was called, not what real transactional state existed at the moment
+  of the Stripe call. Reading `connection.savepoint_ids` — Django's own
+  live bookkeeping of transaction nesting — inside the mocked Stripe
+  call means the assertion is grounded in what the database connection
+  actually believes is true at that exact moment, which is the property
+  that matters (no open transaction, no held lock), not a proxy for it.
+- *Q: Every Stripe-touching test in this file mocks
+  `stripe.Refund.create`/`stripe.Webhook.construct_event` directly.
+  What's the one thing this test suite, taken as a whole, cannot prove
+  about the checkout/refund flow no matter how thorough it gets?* — That
+  the *real* Stripe API actually behaves the way these mocks assume it
+  does — the shape of a refund response, what `construct_event` actually
+  validates, what error types a live `StripeError` can be. A test suite
+  built entirely on mocks proves this codebase's own logic is internally
+  consistent with its assumptions about Stripe's contract, not that
+  those assumptions are still correct against Stripe's real API (a
+  library version bump, an API version change) — which is exactly the
+  gap `docs/fixes-2026-09.md`'s "Test settings isolation" entry is
+  implicitly guarding against from the other direction: making sure a
+  *misconfigured* test environment can't accidentally call the real API
+  either, rather than trying to prove the mocked one still matches it.
+- **Harder follow-up:** *Q: [[P1-19]]'s 32 tests all passed against
+  already-correct code. Was writing them still worth doing, given no bug
+  was found?* — Yes, and the entry says so explicitly rather than
+  treating a clean result as a non-event: before [[P1-19]], the code
+  paths that decide who gets money back (`CancelOrderAPIView`,
+  `RequestReturnAPIView`, and four admin actions calling
+  `stripe.Refund.create`) had **zero** dedicated tests — any future
+  change to any eligibility check, any window calculation, any status
+  transition in those files could regress silently, exactly the
+  [[P0-01]]-shaped risk this guide's own "Testing strategy" question (in
+  Questions by topic) names directly: a green suite proves nothing about
+  code the suite never actually exercises. [[P1-19]] converted "we
+  believe this is correct" into "this is asserted, and will fail loudly
+  the moment it stops being true" — the value delivered is the coverage
+  existing at all, independent of whether this particular pass happened
+  to also find a bug.
+
+---
+
 ## How the pieces fit
 
 Four walkthroughs, each naming the files involved in order, across both
 codebases. The first is the everyday path; the other three are what
 happens after the sale — a cancellation, a return, and a restock —
-which between them touch almost every file in the two new Backend
-sections above.
+which between them touch almost every file in the three Backend —
+accounts/products/orders sections above.
 
 ### 1. A guest adds an item, logs in, and pays — through to the webhook and the confirmation email
 
@@ -7734,6 +8887,7 @@ source files, entry points, and ambient type-declaration files), plus
 `package.json`, `e2e/monkey-test.spec.ts`, every file under `styles/`
 (the two foundation files individually, the remaining 27 as one grouped
 section), and — for the Backend sections and the four full-stack
-walkthroughs above — every file under `tresse_backend/newsletter/` and
-`tresse_backend/templates/emails/`. See the top of this document for the
-running file/fix count.*
+walkthroughs above — every file under `tresse_backend/newsletter/`,
+`tresse_backend/templates/emails/`, `tresse_backend/accounts/`,
+`tresse_backend/products/`, and `tresse_backend/orders/`. See the top of
+this document for the running file/fix count.*
