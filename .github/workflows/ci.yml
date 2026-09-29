@@ -99,6 +99,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Type check
+        run: npx tsc --noEmit
+
       - name: Lint with Biome
         run: npm run lint
 
