@@ -278,6 +278,14 @@ EMAIL_TIMEOUT = config("EMAIL_TIMEOUT", default=10, cast=int)
 EMAIL_TIMEOUT = config("EMAIL_TIMEOUT", default=10, cast=int)
 
 # ------------------------------------------------------------
+# Owner notifications (orders/notifications.py)
+# ------------------------------------------------------------
+OWNER_NOTIFICATION_EMAIL = config("OWNER_NOTIFICATION_EMAIL", default="").strip()
+TELEGRAM_BOT_TOKEN = config("TELEGRAM_BOT_TOKEN", default="").strip()
+TELEGRAM_CHAT_ID = config("TELEGRAM_CHAT_ID", default="").strip()
+BACKEND_URL = config("BACKEND_URL", default="").strip().rstrip("/")
+
+# ------------------------------------------------------------
 # Stripe
 # ------------------------------------------------------------
 STRIPE_PUBLIC_KEY = config("STRIPE_PUBLIC_KEY", default="")

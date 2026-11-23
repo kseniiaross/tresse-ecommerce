@@ -19,6 +19,10 @@ os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_dummy"
 os.environ["RESEND_API_KEY"] = "dummy"
 os.environ["SENTRY_DSN"] = ""
 os.environ["RECAPTCHA_SECRET_KEY"] = "dummy"
+# Never message the real Telegram bot or the owner from a test run.
+os.environ["TELEGRAM_BOT_TOKEN"] = ""
+os.environ["TELEGRAM_CHAT_ID"] = ""
+os.environ["OWNER_NOTIFICATION_EMAIL"] = ""
 
 from .settings import *  # noqa: E402, F401, F403
 

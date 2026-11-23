@@ -26,6 +26,7 @@ from .emails import (
     send_order_confirmation_email,
 )
 from .models import Order, OrderItem
+from .notifications import notify_owner_new_order
 
 logger = logging.getLogger(__name__)
 
@@ -1236,6 +1237,7 @@ def stripe_webhook(
                         )
 
                 transaction.on_commit(lambda: _send_email_after_commit(order.id))
+                transaction.on_commit(lambda: notify_owner_new_order(order.id))
 
     except Exception:
         logger.exception(
