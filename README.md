@@ -6,7 +6,7 @@
 
 [![Live Site](https://img.shields.io/badge/live%20site-tressehandmade.com-black?style=flat-square)](https://tressehandmade.com/)
 [![CI](https://img.shields.io/github/actions/workflow/status/kseniiaross/tresse-ecommerce/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/kseniiaross/tresse-ecommerce/actions)
-![Tests](https://img.shields.io/badge/tests-455%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-479%20passing-brightgreen?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](./LICENSE)
 
 [Live Demo](https://tressehandmade.com/) · [Backend](./tresse_backend) · [Frontend](./tresse_frontend)
@@ -43,6 +43,7 @@ This isn't a tutorial clone. It's a real, deployed store with the messiness that
 - **Cloudinary** — media storage
 - **Sentry** — error monitoring and alerting
 - **Anymail / Resend** — transactional email
+- **Telegram Bot API** — order alerts to the shop owner
 
 </td>
 <td valign="top" width="50%">
@@ -78,7 +79,7 @@ This isn't a tutorial clone. It's a real, deployed store with the messiness that
 </tr>
 </table>
 
-**CI/CD:** GitHub Actions runs both suites on every push — Django system check, Ruff lint and format check, and pytest against a real PostgreSQL service container for the backend; Biome, Vitest and a production build for the frontend. Deploys are automatic: Railway for the API (migrations run on every deploy), Vercel for the SPA.
+**CI/CD:** GitHub Actions runs both suites on every push — Django system check, Ruff lint and format check, and pytest against a real PostgreSQL service container for the backend; `tsc --noEmit`, Biome, Vitest and a production build for the frontend. Deploys are automatic: Railway for the API (migrations run on every deploy), Vercel for the SPA.
 
 ---
 
@@ -105,6 +106,7 @@ This isn't a tutorial clone. It's a real, deployed store with the messiness that
 - `SELECT FOR UPDATE` row locking on stock, and — if the last piece sells twice — an automatic full refund with an idempotency key, a plain-text apology email to the customer, and an alert to support and Sentry
 - Stripe Tax for automatic US sales tax, with nexus monitoring across states
 - Shipping currently restricted to the United States at the Checkout session level, with free standard delivery
+- Owner notification on every paid order — an email and a Telegram message listing the items, flagging custom measurements on made-to-order pieces, and linking straight to the order in the admin. Sent only after the order is saved, and a failed channel is logged without ever affecting the order
 
 **Account & Orders**
 
@@ -133,8 +135,8 @@ Testing here isn't a checkbox — it's how several real bugs in this codebase we
 
 | Layer | Tool | Coverage | Status |
 |---|---|---|---|
-| **Backend** | pytest | 191 tests — auth & account lifecycle, orders, Stripe checkout/webhook/refunds, cart & inventory, catalog, newsletter, email templates | ✅ passing |
-| **Frontend (unit/integration)** | Vitest + Testing Library | 264 tests — Redux slices, API error handling, hooks, every major page and form | ✅ passing |
+| **Backend** | pytest | 207 tests — auth & account lifecycle, orders, Stripe checkout/webhook/refunds, owner notifications, cart & inventory, catalog, newsletter, email templates | ✅ passing |
+| **Frontend (unit/integration)** | Vitest + Testing Library | 272 tests — Redux slices, API error handling, hooks, every major page and form | ✅ passing |
 | **Frontend (stress test)** | Playwright | 150 seeded randomized actions — clicks, garbage input, navigation, modal toggling; fails on any unhandled page error or 5xx response | ✅ passing |
 | **Type checking** | `tsc --noEmit` | Whole frontend | ✅ 0 errors |
 | **Lint / format** | Ruff · Biome (incl. a11y) | Whole backend and frontend | ✅ 0 errors |
@@ -146,6 +148,7 @@ Testing here isn't a checkbox — it's how several real bugs in this codebase we
 - **Returns:** final-sale and custom-size items refused, undelivered orders refused, the window counted from delivery, and each admin action verified to change only qualifying orders.
 - **Auth, the whole lifecycle:** registration, login, password reset and change, soft-delete, and time-boxed restore — including that a deactivated account cannot be resurrected through password reset.
 - **Cart correctness in both modes:** guest (localStorage) and authenticated (server), including per-line merge-on-login and lines that differ only by custom measurements.
+- **Owner notifications:** sent only after the order commits, never twice for a duplicate webhook, and a Telegram or email outage never breaks the webhook or blocks the other channel.
 - **Consent gating:** the tracking helpers no-op without consent, each vendor script is injected at most once with it, and consent withdrawal calls the vendor revoke APIs.
 - **Every major page:** catalog, product detail, cart, checkout, order history, wishlist, dashboard — rendered, interacted with, and asserted against real component markup.
 
@@ -186,6 +189,17 @@ The audit and the fixes were done with AI assistance — Claude for the codebase
 
 ---
 
+## Known Limitations & Next Steps
+
+Deliberate trade-offs for a shop of this size, and the order I'd address them in:
+
+- **Per-item returns.** A return request is currently refused for the whole order if it contains a final-sale item; returns should be decided item by item.
+- **Stock reservation at checkout.** Stock is locked when the payment lands, not reserved while the customer is in Checkout. If the last piece sells twice, the second buyer is refunded automatically — correct, but a reservation with an expiry is the better experience at volume.
+- **Auth tokens in httpOnly cookies.** Tokens live in localStorage to keep a cross-origin SPA simple; httpOnly cookies would be safer against XSS.
+- **Anonymising deleted accounts.** Deleted accounts can be restored for 30 days; personal data should be anonymised once that window closes.
+
+---
+
 ## Getting Started
 
 ### Prerequisites
@@ -196,7 +210,8 @@ The audit and the fixes were done with AI assistance — Claude for the codebase
 cd tresse_backend
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # fill in SECRET_KEY, DB credentials, Stripe test keys, etc.
+# create .env with SECRET_KEY, FRONTEND_URL, DB credentials, Stripe test keys, etc.
+# optional: OWNER_NOTIFICATION_EMAIL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, BACKEND_URL
 python manage.py migrate
 python manage.py runserver
 ```
@@ -205,7 +220,7 @@ python manage.py runserver
 ```bash
 cd tresse_frontend
 npm install
-cp .env.example .env      # fill in VITE_API_URL, Stripe publishable key, etc.
+# create .env with VITE_API_URL, Stripe publishable key, etc.
 npm run dev
 ```
 
@@ -230,24 +245,24 @@ npm run test:monkey     # randomized stress test (needs the backend running)
 
 ```
 tresse-ecommerce/
-├── tresse_backend/              Django REST API
-│   ├── accounts/                 Auth, profiles, admin 2FA
-│   ├── orders/                    Orders, Stripe checkout & webhooks, returns
-│   ├── products/                   Catalog, cart, wishlist, stock signals
-│   ├── newsletter/                 Subscribe, signed-token unsubscribe
-│   ├── templates/emails/           Transactional email templates
-│   └── docs/                       Audit fix log
-├── tresse_frontend/              React + TypeScript SPA
+├── tresse_backend/            Django REST API
+│   ├── accounts/              Auth, profiles, admin 2FA
+│   ├── orders/                Orders, Stripe checkout & webhooks, returns, owner notifications
+│   ├── products/              Catalog, cart, wishlist, stock signals
+│   ├── newsletter/            Subscribe, signed-token unsubscribe
+│   ├── templates/emails/      Transactional email templates
+│   └── docs/                  Audit fix log
+├── tresse_frontend/           React + TypeScript SPA
 │   ├── src/
-│   │   ├── components/             Auth forms, modals, cookie consent
-│   │   ├── view/                    Page-level components
-│   │   ├── store/                    Redux slices
-│   │   ├── hooks/                     Shared dialog/focus behaviour
-│   │   ├── utils/                      Pixel loaders, storage, API client
-│   │   └── api/                         Axios client & endpoints
-│   ├── e2e/                        Playwright stress test
-│   └── docs/                       Audit fix log
-└── .github/workflows/            CI (backend + frontend)
+│   │   ├── components/        Auth forms, modals, cookie consent
+│   │   ├── view/              Page-level components
+│   │   ├── store/             Redux slices
+│   │   ├── hooks/             Shared dialog/focus behaviour
+│   │   ├── utils/             Pixel loaders, storage, API client
+│   │   └── api/               Axios client & endpoints
+│   ├── e2e/                   Playwright stress test
+│   └── docs/                  Audit fix log
+└── .github/workflows/         CI (backend + frontend)
 ```
 
 ---
