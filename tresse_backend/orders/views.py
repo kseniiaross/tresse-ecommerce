@@ -12,6 +12,8 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from products.models import ProductSize
+
 from .emails import (
     send_order_canceled_email,
     send_refund_initiated_email,
@@ -93,6 +95,30 @@ def _clear_cancel_refund_initiating(order_id: int) -> None:
         )
     except Exception:
         logger.exception("cancel_order_clear_initiating_failed order_id=%s", order_id)
+
+
+def _restock_canceled_order(order: Order) -> None:
+    """Puts every item of a canceled order back in stock. Must run inside
+    the transaction that marks the order canceled, so a failure there rolls
+    the restock back too. Items without a product_size are skipped. Rows
+    are locked and saved one by one, not with queryset.update(), so the
+    back-in-stock post_save signal still fires on a zero-to-positive
+    change."""
+    totals: dict[int, int] = {}
+
+    for product_size_id, quantity in order.items.filter(product_size__isnull=False).values_list(
+        "product_size_id", "quantity"
+    ):
+        totals[product_size_id] = totals.get(product_size_id, 0) + quantity
+
+    if not totals:
+        return
+
+    product_sizes = ProductSize.objects.select_for_update().filter(pk__in=totals).order_by("pk")
+
+    for product_size in product_sizes:
+        product_size.quantity += totals[product_size.pk]
+        product_size.save(update_fields=["quantity"])
 
 
 class CancelOrderAPIView(APIView):
@@ -222,6 +248,12 @@ class CancelOrderAPIView(APIView):
         try:
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order.pk)
+
+                # Phase 1's "initiating" marker already lets only one
+                # request get here; checking the status under the row lock
+                # as well guarantees the stock comes back exactly once.
+                if order.status != "canceled":
+                    _restock_canceled_order(order)
 
                 order.status = "canceled"
                 order.stripe_refund_id = refund_id

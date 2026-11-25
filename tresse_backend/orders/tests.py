@@ -20,7 +20,7 @@ from rest_framework.test import APIClient
 
 from orders.admin import OrderAdmin
 from orders.models import Order, OrderItem
-from products.models import Cart, CartItem, Product, ProductSize, Size
+from products.models import Cart, CartItem, Product, ProductSize, Size, StockSubscription
 
 User = get_user_model()
 
@@ -1704,3 +1704,159 @@ class OrderAdminReturnActionsTestCase(OrderFixtureMixin, TestCase):
         # savepoint depth as before the action ran — not nested one deeper
         # inside that transaction.
         self.assertEqual(observed_depth["value"], baseline_depth)
+
+
+# ============================================================
+# Stock on cancel / return
+# ============================================================
+class OrderStockRestoreTestCase(OrderFixtureMixin, TestCase):
+    """A successful cancel puts every item back in stock exactly once;
+    the return flow never touches stock (items are inspected first)."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.user = _make_user("restock@example.com")
+        self.client.force_authenticate(user=self.user)
+        for target in (
+            "orders.views.send_order_canceled_email",
+            "orders.views.send_refund_initiated_email",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _product_size(self, size_name, quantity):
+        size, _ = Size.objects.get_or_create(name=size_name)
+        return ProductSize.objects.create(
+            product=self._make_product(), size=size, quantity=quantity
+        )
+
+    def _order_with(self, *lines, **order_kwargs):
+        order = self._make_order(**order_kwargs)
+        for product_size, quantity in lines:
+            self._add_item(
+                order,
+                product_size=product_size,
+                size=product_size.size.name,
+                quantity=quantity,
+            )
+        return order
+
+    def _cancel(self, order):
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(reverse("order-cancel", args=[order.id]))
+
+    def _quantity(self, product_size):
+        product_size.refresh_from_db()
+        return product_size.quantity
+
+    @patch("orders.views.stripe.Refund.create")
+    def test_cancel_restores_quantity_of_every_item(self, mock_refund):
+        mock_refund.return_value = {"id": "re_restock_all", "status": "succeeded"}
+        small = self._product_size("S", 3)
+        medium = self._product_size("M", 0)
+        # Two lines on the same size (e.g. different custom lengths) and an
+        # item with no product_size, which must simply be skipped.
+        order = self._order_with((small, 2), (medium, 1), (small, 1))
+        self._add_item(order, product_size=None, size="CUSTOM SIZE", quantity=1)
+
+        resp = self._cancel(order)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._quantity(small), 6)
+        self.assertEqual(self._quantity(medium), 1)
+
+    @patch("orders.views.stripe.Refund.create")
+    def test_two_cancel_attempts_restore_stock_once(self, mock_refund):
+        mock_refund.return_value = {"id": "re_restock_twice", "status": "succeeded"}
+        product_size = self._product_size("S", 3)
+        order = self._order_with((product_size, 2))
+
+        first = self._cancel(order)
+        second = self._cancel(order)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_refund.assert_called_once()
+        self.assertEqual(self._quantity(product_size), 5)
+
+    @patch("orders.views.stripe.Refund.create", side_effect=stripe.error.StripeError("boom"))
+    def test_stripe_refund_failure_leaves_stock_unchanged(self, mock_refund):
+        product_size = self._product_size("S", 3)
+        order = self._order_with((product_size, 2))
+
+        resp = self._cancel(order)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._quantity(product_size), 3)
+
+    @patch("orders.views.stripe.Refund.create")
+    def test_failure_after_stripe_refund_leaves_stock_unchanged(self, mock_refund):
+        mock_refund.return_value = {"id": "re_restock_phase3", "status": "succeeded"}
+        product_size = self._product_size("S", 3)
+        order = self._order_with((product_size, 2))
+
+        # Phase 3's save is the only one that includes "status".
+        original_save = Order.save
+
+        def flaky_save(self_order, *args, **kwargs):
+            update_fields = kwargs.get("update_fields") or ()
+            if "status" in update_fields:
+                raise RuntimeError("db exploded while recording the refund")
+            return original_save(self_order, *args, **kwargs)
+
+        with patch.object(Order, "save", flaky_save):
+            resp = self._cancel(order)
+
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        mock_refund.assert_called_once()
+        self.assertEqual(self._quantity(product_size), 3)
+
+    @patch("orders.admin.stripe.Refund.create")
+    def test_return_flow_never_changes_stock(self, mock_refund):
+        mock_refund.return_value = {"id": "re_return", "status": "succeeded"}
+        product_size = self._product_size("S", 3)
+        order = self._order_with((product_size, 2), delivered_at=timezone.now() - timedelta(days=1))
+
+        resp = self.client.post(reverse("order-return", args=[order.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._quantity(product_size), 3)
+
+        admin = OrderAdmin(Order, AdminSite())
+        steps = (
+            (admin.approve_return, "approved"),
+            (admin.mark_return_received, "received"),
+            (admin.issue_stripe_refund, "refunded"),
+        )
+        for action, expected_status in steps:
+            request = RequestFactory().post("/admin/orders/order/")
+            request.session = {}
+            request._messages = FallbackStorage(request)
+            with self.captureOnCommitCallbacks(execute=True):
+                action(request, Order.objects.filter(pk=order.pk))
+
+            order.refresh_from_db()
+            self.assertEqual(order.return_status, expected_status)
+            self.assertEqual(self._quantity(product_size), 3)
+
+    @patch("products.signals.send_back_in_stock_email")
+    @patch("orders.views.stripe.Refund.create")
+    def test_cancel_from_zero_to_one_sends_back_in_stock_notification(
+        self, mock_refund, mock_back_in_stock
+    ):
+        mock_refund.return_value = {"id": "re_restock_notify", "status": "succeeded"}
+        product_size = self._product_size("S", 0)
+        subscription = StockSubscription.objects.create(
+            product=product_size.product, email="waiting@example.com"
+        )
+        order = self._order_with((product_size, 1))
+
+        resp = self._cancel(order)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._quantity(product_size), 1)
+        mock_back_in_stock.assert_called_once()
+        self.assertEqual(mock_back_in_stock.call_args.kwargs["to_email"], "waiting@example.com")
+        subscription.refresh_from_db()
+        self.assertIsNotNone(subscription.notified_at)
